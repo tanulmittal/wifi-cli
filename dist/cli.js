@@ -10,7 +10,7 @@ const program = new Command();
 program
     .name('openwifi')
     .description('Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.')
-    .version('0.1.3')
+    .version('0.1.4')
     .option('--interface <name>', 'WiFi interface (e.g. wlan0, en0)')
     .option('--timeout <sec>', 'command timeout in seconds', '25')
     .option('--json', 'machine-readable JSON output')

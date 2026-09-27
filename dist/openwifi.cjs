@@ -4264,7 +4264,7 @@ async function upgradeFromGithub() {
 
 // src/cli.ts
 var program2 = new Command();
-program2.name("openwifi").description("Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.").version("0.1.3").option("--interface <name>", "WiFi interface (e.g. wlan0, en0)").option("--timeout <sec>", "command timeout in seconds", "25").option("--json", "machine-readable JSON output").option("--yes", "skip confirmations (scripts)");
+program2.name("openwifi").description("Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.").version("0.1.4").option("--interface <name>", "WiFi interface (e.g. wlan0, en0)").option("--timeout <sec>", "command timeout in seconds", "25").option("--json", "machine-readable JSON output").option("--yes", "skip confirmations (scripts)");
 var tmo = () => {
   const seconds = Number(program2.opts().timeout ?? 25);
   if (!Number.isFinite(seconds) || seconds <= 0) throw new Error("--timeout must be a positive number of seconds");

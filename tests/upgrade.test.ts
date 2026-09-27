@@ -1,7 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { setRunner } from '../src/util.js';
 import { upgradeFromGithub } from '../src/upgrade.js';
+
+test('Git installs use the committed bundle without npm preparation', () => {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  for (const name of ['build', 'prepare', 'prepack', 'preinstall', 'install', 'postinstall']) {
+    assert.equal(pkg.scripts?.[name], undefined, `${name} triggers Git dependency preparation`);
+  }
+  assert.equal(pkg.bin.openwifi, './dist/openwifi.cjs');
+});
 
 test('upgrade installs the GitHub package globally with durable links', async () => {
   const calls: unknown[][] = [];

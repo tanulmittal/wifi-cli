@@ -4,4 +4,4 @@
 - Invoke system tools with argument arrays, not shell interpolation. Never print or persist WiFi passwords outside system stores.
 - Mock OS commands in tests. Do not run connection-changing smoke tests on a live host.
 - Reject unsupported writes before invoking another network tool. Do not automatically install, start, or switch a host's network manager.
-- Run `npm ci`, `npm run build`, and `npm test` after code changes.
+- Run `npm ci`, `npm run bundle`, and `npm test` after code changes. Do not define npm `build` or lifecycle scripts, which trigger Git dependency preparation during GitHub installs.

@@ -38,5 +38,5 @@ Needs admin? It prints the exact `sudo openwifi …` re-run — never auto-eleva
 ## Dev
 
 ```sh
-npm install; npm run build; npm test; node dist/openwifi.cjs --help
+npm install; npm run bundle; npm test; node dist/openwifi.cjs --help
 ```
