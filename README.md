@@ -3,7 +3,7 @@
 Friendly WiFi manager for Ubuntu / Linux and macOS. Built for non-tech users: bare `openwifi` is guided, flags work for scripts.
 
 ```sh
-npm install -g github:tanulmittal/wifi-cli
+npm install -g github:tanulmittal/wifi-cli --install-links
 openwifi               # guided menu
 openwifi --help
 openwifi scan
@@ -13,7 +13,7 @@ openwifi forget "OldWifi"
 openwifi doctor
 ```
 
-This installs directly from the public [GitHub repository](https://github.com/tanulmittal/wifi-cli). Node.js 18+ and npm are required; no npm registry release is needed for this package.
+This installs directly from the public [GitHub repository](https://github.com/tanulmittal/wifi-cli). `--install-links` makes npm copy the Git package instead of linking its temporary clone (the default may leave a broken `openwifi` command). Node.js 18+ and npm are required; no npm registry release is needed.
 
 ## Commands
 
