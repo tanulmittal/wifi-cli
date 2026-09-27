@@ -53,12 +53,10 @@ program.command('connect <ssid>')
     .description('Connect to a WiFi network (prompts for password if needed)')
     .option('-p, --password <pw>', 'password (prefer interactive prompt; shell history risk)')
     .option('--hidden', 'hidden SSID')
-    .option('--no-save', 'do not save (Linux: temporary)')
+    .option('--no-save', 'unsupported in v1; exits before changing anything')
     .action(async (ssid, opts) => {
     try {
         let pw = opts.password;
-        if (pw === undefined && !process.stdin.isTTY)
-            failClosed('No password and no TTY — pass -p/--password or run interactively');
         if (pw === undefined && process.stdin.isTTY) {
             const v = await p.password({ message: `Password for "${ssid}" (empty if open)`, mask: '•' });
             if (p.isCancel(v)) {
