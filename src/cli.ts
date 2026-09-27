@@ -1,0 +1,131 @@
+#!/usr/bin/env node
+import { Command } from 'commander';
+import * as p from '@clack/prompts';
+import { adapter } from './adapters/index.js';
+import { isAuthError, sudoHint, printJson, failClosed } from './util.js';
+import { guided } from './interactive.js';
+
+const program = new Command();
+program
+  .name('openwifi')
+  .description('Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.')
+  .version('0.1.0')
+  .option('--interface <name>', 'WiFi interface (e.g. wlan0, en0)')
+  .option('--timeout <sec>', 'command timeout in seconds', '25')
+  .option('--json', 'machine-readable JSON output')
+  .option('--yes', 'skip confirmations (scripts)');
+
+const tmo = () => Math.max(5, Number(program.opts().timeout ?? 25)) * 1000;
+const jout = (v: unknown) => { if (program.opts().json) printJson(v); };
+
+function handleErr(e: any, argv: string[]) {
+  if (isAuthError(e)) { console.error(sudoHint(argv)); process.exit(1); }
+  if (program.opts().json) printJson({ ok: false, error: e?.message ?? String(e) });
+  else console.error(`Error: ${e?.message ?? e}`);
+  process.exit(1);
+}
+const raw = (args: string[]) => ['openwifi', ...args];
+
+program.command('scan')
+  .description('Search nearby WiFi networks')
+  .option('--band <b>', 'v1 accepts but ignores band filter (fail-open note)')
+  .action(async (opts) => {
+    try {
+      if (opts.band) console.error(`Note: --band "${opts.band}" is accepted but not filtered in v1; showing all.`);
+      const ad: any = adapter();
+      const nets = await ad.scan(program.opts().interface, tmo());
+      if (program.opts().json) printJson({ ok: true, count: nets.length, networks: nets });
+      else { console.log(`Found ${nets.length} network(s):`); for (const n of nets) console.log(`  ${String(n.signal ?? '').padStart(3)}%  ${n.ssid}  (${n.security})`); }
+    } catch (e) { handleErr(e, raw(['scan'])); }
+  });
+
+program.command('connect <ssid>')
+  .description('Connect to a WiFi network (prompts for password if needed)')
+  .option('-p, --password <pw>', 'password (prefer interactive prompt; shell history risk)')
+  .option('--hidden', 'hidden SSID')
+  .option('--no-save', 'do not save (Linux: temporary)')
+  .action(async (ssid, opts) => {
+    try {
+      let pw = opts.password;
+      if (pw === undefined && !process.stdin.isTTY) failClosed('No password and no TTY — pass -p/--password or run interactively');
+      if (pw === undefined && process.stdin.isTTY) {
+        const v = await p.password({ message: `Password for "${ssid}" (empty if open)`, mask: '•' });
+        if (p.isCancel(v)) { console.log('Cancelled.'); return; }
+        pw = String(v) || undefined;
+      }
+      const ad: any = adapter();
+      if (opts.save === false && process.platform === 'linux') console.error('Note: --no-save is best-effort on nmcli in v1.');
+      await ad.connect(ssid, { password: pw, hidden: !!opts.hidden, iface: program.opts().interface, timeoutMs: tmo() });
+      if (program.opts().json) printJson({ ok: true, ssid }); else console.log(`Connected to "${ssid}".`);
+    } catch (e) { handleErr(e, raw(['connect', ssid])); }
+  });
+
+program.command('list')
+  .description('List saved WiFi networks')
+  .action(async () => {
+    try { const ad: any = adapter(); const items = await ad.list(program.opts().interface); if (program.opts().json) printJson({ ok: true, saved: items }); else { if (!items.length) console.log('No saved networks.'); for (const s of items) console.log(`  ${s.name}`); } }
+    catch (e) { handleErr(e, raw(['list'])); }
+  });
+
+program.command('status')
+  .description('Show current WiFi status')
+  .action(async () => {
+    try { const ad: any = adapter(); const st = await ad.status(program.opts().interface); if (program.opts().json) printJson({ ok: true, status: st }); else console.log(JSON.stringify(st, null, 2)); }
+    catch (e) { handleErr(e, raw(['status'])); }
+  });
+
+program.command('disconnect')
+  .description('Disconnect from current WiFi')
+  .action(async () => {
+    try { const ad: any = adapter(); await ad.disconnect(program.opts().interface); if (program.opts().json) printJson({ ok: true }); else console.log('Disconnected.'); }
+    catch (e) { handleErr(e, raw(['disconnect'])); }
+  });
+
+const forget = async (profile: string) => {
+  try {
+    if (!program.opts().yes && process.stdin.isTTY) {
+      const ok = await p.confirm({ message: `Forget "${profile}"? You will need the password to rejoin.` });
+      if (p.isCancel(ok) || !ok) { console.log('Kept.'); return; }
+    }
+    const ad: any = adapter(); await ad.forget(profile, program.opts().interface);
+    if (program.opts().json) printJson({ ok: true, forgot: profile }); else console.log(`Forgot "${profile}".`);
+  } catch (e) { handleErr(e, raw(['forget', profile])); }
+};
+program.command('forget <profile>').description('Forget / remove a saved network').action(forget);
+program.command('remove <profile>').description('Alias of forget').action(forget);
+
+program.command('edit <profile>')
+  .description('Safe edit: password, autoconnect, priority, rename (Linux full; macOS password-only)')
+  .option('--new-password <pw>', 'new password')
+  .option('--autoconnect <on|off>', 'toggle autoconnect (Linux only)')
+  .option('--priority <n>', 'autoconnect priority (Linux only)')
+  .option('--rename <name>', 'rename profile (Linux only)')
+  .action(async (profile, opts) => {
+    try {
+      let npw = opts.newPassword;
+      if (npw === undefined && !opts.autoconnect && opts.priority === undefined && !opts.rename) {
+        if (!process.stdin.isTTY) failClosed('Nothing to edit — pass --new-password/--autoconnect/--priority/--rename');
+        const v = await p.password({ message: 'New password', mask: '•' });
+        if (p.isCancel(v)) { console.log('Cancelled.'); return; }
+        npw = String(v) || undefined;
+      }
+      if (opts.autoconnect && !/^(on|off)$/.test(opts.autoconnect)) failClosed('--autoconnect must be on|off');
+      const ad: any = adapter();
+      await ad.edit(profile, { newPassword: npw, autoconnect: opts.autoconnect, priority: opts.priority !== undefined ? Number(opts.priority) : undefined, rename: opts.rename });
+      if (program.opts().json) printJson({ ok: true, edited: profile }); else console.log(`Saved "${profile}".`);
+    } catch (e) { handleErr(e, raw(['edit', profile])); }
+  });
+
+program.command('on').description('Turn WiFi on').action(async () => { try { const ad: any = adapter(); await ad.radio(true, program.opts().interface); if (program.opts().json) printJson({ ok: true, radio: 'on' }); else console.log('WiFi on.'); } catch (e) { handleErr(e, raw(['on'])); } });
+program.command('off').description('Turn WiFi off').action(async () => { try { const ad: any = adapter(); await ad.radio(false, program.opts().interface); if (program.opts().json) printJson({ ok: true, radio: 'off' }); else console.log('WiFi off.'); } catch (e) { handleErr(e, raw(['off'])); } });
+
+program.command('doctor')
+  .description('Troubleshoot: adapter, radio, scan, connection, DNS with fix hints')
+  .action(async () => {
+    try { const ad: any = adapter(); const checks = await ad.doctor(program.opts().interface); if (program.opts().json) printJson({ ok: true, checks }); else { console.log('Diagnosis:'); for (const c of checks) console.log(`  ${(c.ok ? '✓' : '✗')} ${c.name}: ${c.hint}`); } }
+    catch (e) { handleErr(e, raw(['doctor'])); }
+  });
+
+// Bare `openwifi` -> guided menu (non-tech default)
+if (!process.argv.slice(2).length) { guided([]).catch(e => { console.error(e?.message ?? e); process.exit(1); }); }
+else program.parseAsync(process.argv);
