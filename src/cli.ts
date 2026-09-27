@@ -9,14 +9,17 @@ const program = new Command();
 program
   .name('openwifi')
   .description('Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.')
-  .version('0.1.0')
+  .version('0.1.1')
   .option('--interface <name>', 'WiFi interface (e.g. wlan0, en0)')
   .option('--timeout <sec>', 'command timeout in seconds', '25')
   .option('--json', 'machine-readable JSON output')
   .option('--yes', 'skip confirmations (scripts)');
 
-const tmo = () => Math.max(5, Number(program.opts().timeout ?? 25)) * 1000;
-const jout = (v: unknown) => { if (program.opts().json) printJson(v); };
+const tmo = () => {
+  const seconds = Number(program.opts().timeout ?? 25);
+  if (!Number.isFinite(seconds) || seconds <= 0) throw new Error('--timeout must be a positive number of seconds');
+  return seconds * 1000;
+};
 
 function handleErr(e: any, argv: string[]) {
   if (isAuthError(e)) { console.error(sudoHint(argv)); process.exit(1); }
@@ -24,14 +27,12 @@ function handleErr(e: any, argv: string[]) {
   else console.error(`Error: ${e?.message ?? e}`);
   process.exit(1);
 }
-const raw = (args: string[]) => ['openwifi', ...args];
+const raw = (args: string[]) => args;
 
 program.command('scan')
   .description('Search nearby WiFi networks')
-  .option('--band <b>', 'v1 accepts but ignores band filter (fail-open note)')
   .action(async (opts) => {
     try {
-      if (opts.band) console.error(`Note: --band "${opts.band}" is accepted but not filtered in v1; showing all.`);
       const ad: any = adapter();
       const nets = await ad.scan(program.opts().interface, tmo());
       if (program.opts().json) printJson({ ok: true, count: nets.length, networks: nets });
@@ -54,8 +55,7 @@ program.command('connect <ssid>')
         pw = String(v) || undefined;
       }
       const ad: any = adapter();
-      if (opts.save === false && process.platform === 'linux') console.error('Note: --no-save is best-effort on nmcli in v1.');
-      await ad.connect(ssid, { password: pw, hidden: !!opts.hidden, iface: program.opts().interface, timeoutMs: tmo() });
+      await ad.connect(ssid, { password: pw, hidden: !!opts.hidden, iface: program.opts().interface, timeoutMs: tmo(), save: opts.save });
       if (program.opts().json) printJson({ ok: true, ssid }); else console.log(`Connected to "${ssid}".`);
     } catch (e) { handleErr(e, raw(['connect', ssid])); }
   });
@@ -83,7 +83,8 @@ program.command('disconnect')
 
 const forget = async (profile: string) => {
   try {
-    if (!program.opts().yes && process.stdin.isTTY) {
+    if (!program.opts().yes && !process.stdin.isTTY) throw new Error('Forgetting a network needs confirmation; run interactively or pass --yes.');
+    if (!program.opts().yes) {
       const ok = await p.confirm({ message: `Forget "${profile}"? You will need the password to rejoin.` });
       if (p.isCancel(ok) || !ok) { console.log('Kept.'); return; }
     }
@@ -95,7 +96,7 @@ program.command('forget <profile>').description('Forget / remove a saved network
 program.command('remove <profile>').description('Alias of forget').action(forget);
 
 program.command('edit <profile>')
-  .description('Safe edit: password, autoconnect, priority, rename (Linux full; macOS password-only)')
+  .description('Edit password, autoconnect, priority, rename (NetworkManager only)')
   .option('--new-password <pw>', 'new password')
   .option('--autoconnect <on|off>', 'toggle autoconnect (Linux only)')
   .option('--priority <n>', 'autoconnect priority (Linux only)')
@@ -110,6 +111,7 @@ program.command('edit <profile>')
         npw = String(v) || undefined;
       }
       if (opts.autoconnect && !/^(on|off)$/.test(opts.autoconnect)) failClosed('--autoconnect must be on|off');
+      if (opts.priority !== undefined && (!Number.isInteger(Number(opts.priority)) || Number(opts.priority) < -999 || Number(opts.priority) > 999)) failClosed('--priority must be an integer between -999 and 999');
       const ad: any = adapter();
       await ad.edit(profile, { newPassword: npw, autoconnect: opts.autoconnect, priority: opts.priority !== undefined ? Number(opts.priority) : undefined, rename: opts.rename });
       if (program.opts().json) printJson({ ok: true, edited: profile }); else console.log(`Saved "${profile}".`);

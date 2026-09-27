@@ -1,6 +1,6 @@
 {
-  "name": "@tanulmittal/wifi-cli",
-  "version": "0.1.0",
+  "name": "wifi-cli",
+  "version": "0.1.1",
   "description": "Friendly cross-platform WiFi manager for Ubuntu/Linux/macOS — scan, connect, edit, forget, doctor via one 'openwifi' command.",
   "license": "MIT",
   "type": "module",
@@ -18,8 +18,7 @@
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
     "test": "tsx --test tests/*.test.ts",
-    "prepublishOnly": "npm run build",
-    "prepare": "node scripts/prepare.mjs || npm run build"
+    "prepare": "node scripts/prepare.mjs"
   },
   "dependencies": {
     "@clack/prompts": "^0.8.1",
@@ -44,9 +43,6 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/tanulmittal/wifi-cli.git"
-  },
-  "publishConfig": {
-    "access": "public"
   },
   "bugs": "https://github.com/tanulmittal/wifi-cli/issues"
 }

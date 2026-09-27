@@ -6,6 +6,7 @@ export declare function adapter(): {
         hidden?: boolean;
         iface?: string;
         timeoutMs?: number;
+        save?: boolean;
     }): Promise<import("../util.js").RunResult>;
     list(): Promise<import("./linux.js").Profile[]>;
     status(iface?: string): Promise<{
@@ -35,11 +36,13 @@ export declare function adapter(): {
     }[]>;
     kind: "linux";
 } | {
-    scan(timeoutMs?: number): Promise<import("./linux.js").Net[]>;
+    scan(iface?: string, timeoutMs?: number): Promise<import("./linux.js").Net[]>;
     connect(ssid: string, o?: {
         password?: string;
         iface?: string;
         timeoutMs?: number;
+        save?: boolean;
+        hidden?: boolean;
     }): Promise<import("../util.js").RunResult>;
     list(iface?: string): Promise<{
         name: string;
@@ -47,10 +50,10 @@ export declare function adapter(): {
     status(iface?: string): Promise<{
         interface: string;
         network: string;
+        connected: boolean;
         power: string;
     }>;
     disconnect(iface?: string): Promise<{
-        interface: string;
         method: string;
     }>;
     forget(ssid: string, iface?: string): Promise<import("../util.js").RunResult>;
@@ -59,7 +62,7 @@ export declare function adapter(): {
         autoconnect?: "on" | "off";
         priority?: number;
         rename?: string;
-    }): Promise<import("../util.js").RunResult>;
+    }): Promise<never>;
     radio(on: boolean, iface?: string): Promise<import("../util.js").RunResult>;
     doctor(iface?: string): Promise<{
         name: string;

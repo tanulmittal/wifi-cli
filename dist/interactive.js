@@ -1,7 +1,6 @@
 import * as p from '@clack/prompts';
 import { adapter } from './adapters/index.js';
 import { isAuthError, sudoHint } from './util.js';
-function argvOf(a) { return a; }
 export async function guided(rawArgv) {
     p.intro('openwifi — friendly WiFi manager');
     const ad = adapter();
@@ -34,18 +33,18 @@ export async function guided(rawArgv) {
         else if (action === 'connect') {
             const s = p.spinner();
             s.start('Scanning…');
-            const nets = await ad.scan().catch(() => []);
+            const nets = await ad.scan().catch((e) => { p.log.warn(`Scan unavailable: ${e.message}`); return []; });
             s.stop('Scan done.');
             const choices = nets.slice(0, 30).map((n) => ({ value: n.ssid, label: `${n.ssid} (${n.signal}% · ${n.security})` }));
-            choices.push({ value: '__hidden__', label: 'Hidden network (type name)…' });
+            choices.push({ value: '__manual__', label: 'Enter network name manually…' });
             const ssidSel = await p.select({ message: 'Pick a network', options: choices });
             if (p.isCancel(ssidSel)) {
                 p.cancel('Bye.');
                 return;
             }
             let ssid = String(ssidSel);
-            if (ssid === '__hidden__') {
-                const h = await p.text({ message: 'Hidden SSID name' });
+            if (ssid === '__manual__') {
+                const h = await p.text({ message: 'WiFi network name (SSID)' });
                 if (p.isCancel(h)) {
                     p.cancel('Bye.');
                     return;
@@ -59,7 +58,7 @@ export async function guided(rawArgv) {
             }
             const s2 = p.spinner();
             s2.start(`Connecting to ${ssid}…`);
-            await ad.connect(ssid, { password: pw || undefined, hidden: ssidSel === '__hidden__' || undefined });
+            await ad.connect(ssid, { password: pw || undefined });
             s2.stop(`Connected to ${ssid}.`);
         }
         else if (action === 'status') {
@@ -95,6 +94,10 @@ export async function guided(rawArgv) {
                 : await p.text({ message: 'Profile / SSID to edit' });
             if (p.isCancel(sel)) {
                 p.cancel('Bye.');
+                return;
+            }
+            if (ad.kind === 'macos') {
+                p.log.warn('macOS saved-password editing is unavailable. Use connect with a password instead.');
                 return;
             }
             const npw = await p.password({ message: 'New password (empty = keep)', mask: '•' });

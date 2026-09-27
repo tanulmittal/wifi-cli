@@ -20,6 +20,7 @@ export declare const linux: {
         hidden?: boolean;
         iface?: string;
         timeoutMs?: number;
+        save?: boolean;
     }): Promise<import("../util.js").RunResult>;
     list(): Promise<Profile[]>;
     status(iface?: string): Promise<{

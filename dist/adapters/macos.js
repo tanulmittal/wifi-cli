@@ -22,17 +22,41 @@ export function parseAirport(t) {
     return out;
 }
 export function defaultIface() { return process.env.OPENWIFI_IFACE ?? 'en0'; }
+export function parseSystemProfiler(t, iface) {
+    const data = JSON.parse(t).SPAirPortDataType?.[0]?.spairport_airport_interfaces ?? [];
+    const networks = data.find((i) => i._name === iface)?.spairport_airport_other_local_wireless_networks ?? [];
+    return networks.filter((n) => n._name && n._name !== '<redacted>').map((n) => ({
+        ssid: n._name,
+        signal: Number.isFinite(Number.parseInt(n.spairport_signal_noise)) ? Math.max(0, Math.min(100, (Number.parseInt(n.spairport_signal_noise) + 100) * 1.4)) : 0,
+        security: n.spairport_security_mode ?? 'unknown',
+    }));
+}
 export const macos = {
-    async scan(timeoutMs = 20000) {
-        const { stdout } = await run(AIRPORT, ['-s'], { timeoutMs });
-        return parseAirport(stdout);
+    async scan(iface, timeoutMs = 20000) {
+        try {
+            const { stdout } = await run(AIRPORT, ['-s'], { timeoutMs });
+            return parseAirport(stdout);
+        }
+        catch (e) {
+            if (e.code !== 'ENOENT')
+                throw e;
+            const { stdout } = await run('system_profiler', ['SPAirPortDataType', '-json', '-detailLevel', 'full'], { timeoutMs });
+            const nets = parseSystemProfiler(stdout, iface ?? defaultIface());
+            if (!nets.length && stdout.includes('<redacted>'))
+                throw new Error('macOS hides nearby network names from this terminal. Allow Location Services for Terminal (or the app running openwifi), then retry.');
+            return nets;
+        }
     },
     async connect(ssid, o = {}) {
+        if (o.save === false)
+            failClosed('--no-save on macOS (networksetup stores the connection)');
+        if (o.hidden)
+            failClosed('Connecting to a hidden network on macOS');
         const iface = o.iface ?? defaultIface();
         const args = ['-setairportnetwork', iface, ssid];
         if (o.password)
             args.push(o.password);
-        return run('networksetup', args, { timeoutMs: o.timeoutMs ?? 30000 });
+        return run('networksetup', args, { timeoutMs: o.timeoutMs ?? 30000, secrets: o.password ? [o.password] : [] });
     },
     async list(iface) {
         const { stdout } = await run('networksetup', ['-listpreferredwirelessnetworks', iface ?? defaultIface()]);
@@ -44,19 +68,23 @@ export const macos = {
             run('networksetup', ['-getairportnetwork', i]).then(r => r.stdout.trim()).catch(() => ''),
             run('networksetup', ['-getairportpower', i]).then(r => r.stdout.trim()).catch(() => ''),
         ]);
-        return { interface: i, network: net, power };
+        let connected = !/not associated/i.test(net) && /current (wi-fi|airport) network/i.test(net);
+        if (!connected && /not associated/i.test(net)) {
+            const profiler = await run('system_profiler', ['SPAirPortDataType', '-json', '-detailLevel', 'mini']).then(r => JSON.parse(r.stdout)).catch(() => null);
+            const devices = profiler?.SPAirPortDataType?.[0]?.spairport_airport_interfaces ?? [];
+            connected = devices.some((d) => d._name === i && d.spairport_status_information === 'spairport_status_connected');
+        }
+        return { interface: i, network: connected && /not associated/i.test(net) ? 'Connected (network name hidden by macOS)' : net, connected, power };
     },
     async disconnect(iface) {
-        const i = iface ?? defaultIface();
-        // disassociate without powering off when possible
+        if (iface && iface !== defaultIface())
+            failClosed('Disconnect on a non-default macOS WiFi interface');
         try {
             await run(AIRPORT, ['-z']);
-            return { interface: i, method: 'disassociate' };
+            return { method: 'disassociate' };
         }
-        catch {
-            await run('networksetup', ['-setairportpower', i, 'off']);
-            await run('networksetup', ['-setairportpower', i, 'on']);
-            return { interface: i, method: 'power-cycle' };
+        catch (e) {
+            throw new Error(`macOS cannot disconnect without turning off WiFi: ${e.message}. Use openwifi off if you want to disable WiFi.`);
         }
     },
     async forget(ssid, iface) {
@@ -67,9 +95,7 @@ export const macos = {
             failClosed('macOS edit of autoconnect/priority/rename is not supported');
         if (!o.newPassword)
             failClosed('Nothing to edit — pass --new-password');
-        // password lives in Keychain: forget then reconnect
-        await macos.forget(ssid).catch(() => ({}));
-        return macos.connect(ssid, { password: o.newPassword });
+        failClosed('macOS password editing without deleting the saved network; use openwifi connect with the new password');
     },
     async radio(on, iface) {
         return run('networksetup', ['-setairportpower', iface ?? defaultIface(), on ? 'on' : 'off']);
@@ -80,10 +106,10 @@ export const macos = {
         const st = await macos.status(i).catch(() => null);
         const powered = st ? /on/i.test(st.power) : false;
         checks.push({ name: 'power', ok: powered, hint: powered ? `WiFi on (${i}).` : `WiFi is off — run: openwifi on` });
-        const connected = st ? /current wi-fi network|current airport network/i.test(st.network) : false;
+        const connected = st?.connected ?? false;
         checks.push({ name: 'connection', ok: connected, hint: connected ? st.network : 'Not connected — run: openwifi (guided) or openwifi scan' });
-        const scan = await macos.scan(15000).then(n => n.length).catch(() => -1);
-        checks.push({ name: 'scan', ok: scan !== -1, hint: scan === -1 ? 'Scan needs permission — allow Terminal in Location Services / grant Full Disk Access if prompted.' : `Scan works (${scan} networks).` });
+        const scan = await macos.scan(i, 15000).then(n => n.length).catch(() => -1);
+        checks.push({ name: 'scan', ok: scan !== -1, hint: scan === -1 ? 'Allow Location Services for Terminal (or the app running openwifi), then retry.' : `Scan works (${scan} networks).` });
         return checks;
     },
 };

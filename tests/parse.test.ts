@@ -28,3 +28,82 @@ test('redact + auth detection + sudo hint', () => {
   assert.equal(isAuthError(new Error('Not authorized')), true);
   assert.match(sudoHint(['connect', 'My Wifi']), /sudo openwifi/);
 });
+
+import { linux } from '../src/adapters/linux.js';
+import { macos, parseSystemProfiler } from '../src/adapters/macos.js';
+import { setRunner } from '../src/util.js';
+
+test('mac scan falls back when airport is missing and uses selected interface', async () => {
+  const calls: string[] = [];
+  setRunner(async (cmd, args) => {
+    calls.push(cmd);
+    if (cmd.includes('airport')) { const e: any = new Error('missing'); e.code = 'ENOENT'; throw e; }
+    return { stdout: JSON.stringify({ SPAirPortDataType: [{ spairport_airport_interfaces: [
+      { _name: 'en0', spairport_airport_other_local_wireless_networks: [{ _name: 'Other' }] },
+      { _name: 'en9', spairport_airport_other_local_wireless_networks: [{ _name: 'Cafe', spairport_security_mode: 'wpa2' }] },
+    ] }] }), stderr: '' };
+  });
+  try { assert.deepEqual((await macos.scan('en9')).map(n => n.ssid), ['Cafe']); assert.equal(calls[1], 'system_profiler'); }
+  finally { setRunner(null); }
+});
+
+test('mac password edit and disconnect fail before changing radio/profile', async () => {
+  const calls: string[] = [];
+  setRunner(async (cmd) => { calls.push(cmd); const e: any = new Error('missing'); e.code = 'ENOENT'; throw e; });
+  try {
+    await assert.rejects(macos.edit('Cafe', { newPassword: 'secret' }), /not supported/);
+    await assert.rejects(macos.disconnect(), /Use openwifi off/);
+    assert.deepEqual(calls, ['/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport']);
+  } finally { setRunner(null); }
+});
+
+test('linux command paths build expected nmcli invocations', async () => {
+  const calls: string[][] = [];
+  setRunner(async (cmd, args) => {
+    calls.push([cmd, ...args]);
+    if (cmd === 'which') return { stdout: '/usr/bin/nmcli', stderr: '' };
+    if (args.includes('list')) return { stdout: 'Cafe:70:WPA2\n', stderr: '' };
+    if (args.includes('status')) return { stdout: 'wlan0:wifi:connected:Cafe\n', stderr: '' };
+    if (args.includes('show')) return { stdout: 'Cafe:uuid:802-11-wireless\n', stderr: '' };
+    return { stdout: '', stderr: '' };
+  });
+  try {
+    assert.equal((await linux.scan())[0].ssid, 'Cafe');
+    await linux.connect('Cafe', { password: 'secret' });
+    assert.equal((await linux.list())[0].name, 'Cafe');
+    await linux.status();
+    await linux.disconnect();
+    await linux.forget('Cafe');
+    await linux.edit('Cafe', { autoconnect: 'off', priority: 1, rename: 'New' });
+    await linux.radio(true); await linux.radio(false); await linux.doctor();
+    assert.ok(calls.some(c => c.includes('connect')));
+    assert.ok(calls.some(c => c.includes('delete')));
+    assert.ok(calls.some(c => c.includes('modify')));
+    assert.ok(calls.some(c => c.includes('radio')));
+    await assert.rejects(linux.connect('Cafe', { save: false }), /not supported/);
+  } finally { setRunner(null); }
+});
+
+test('mac command paths build expected networksetup invocations', async () => {
+  const calls: string[][] = [];
+  setRunner(async (cmd, args) => {
+    calls.push([cmd, ...args]);
+    return { stdout: cmd === 'networksetup' && args.includes('-listpreferredwirelessnetworks') ? 'Preferred networks on en0:\n\tCafe\n' : 'Wi-Fi Power (en0): On', stderr: '' };
+  });
+  try {
+    assert.equal((await macos.list())[0].name, 'Cafe');
+    await macos.status();
+    await macos.connect('Cafe', { password: 'secret' });
+    await macos.forget('Cafe');
+    await macos.radio(true); await macos.radio(false);
+    assert.ok(calls.some(c => c.includes('-setairportnetwork')));
+    assert.ok(calls.some(c => c.includes('-removepreferredwirelessnetwork')));
+    await assert.rejects(macos.connect('Cafe', { save: false }), /not supported/);
+    await assert.rejects(macos.connect('Cafe', { hidden: true }), /not supported/);
+  } finally { setRunner(null); }
+});
+
+test('system profiler ignores redacted SSIDs', () => {
+  const input = JSON.stringify({ SPAirPortDataType: [{ spairport_airport_interfaces: [{ _name: 'en0', spairport_airport_other_local_wireless_networks: [{ _name: '<redacted>' }] }] }] });
+  assert.deepEqual(parseSystemProfiler(input, 'en0'), []);
+});

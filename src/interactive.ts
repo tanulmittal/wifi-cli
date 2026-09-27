@@ -2,8 +2,6 @@ import * as p from '@clack/prompts';
 import { adapter } from './adapters/index.js';
 import { isAuthError, sudoHint } from './util.js';
 
-function argvOf(a: string[]) { return a; }
-
 export async function guided(rawArgv: string[]) {
   p.intro('openwifi — friendly WiFi manager');
   const ad: any = adapter();
@@ -28,21 +26,21 @@ export async function guided(rawArgv: string[]) {
       for (const n of nets.slice(0, 25)) console.log(`  ${String(n.signal).padStart(3)}%  ${n.ssid}  (${n.security})`);
     } else if (action === 'connect') {
       const s = p.spinner(); s.start('Scanning…');
-      const nets = await ad.scan().catch(() => []); s.stop('Scan done.');
+      const nets = await ad.scan().catch((e: Error) => { p.log.warn(`Scan unavailable: ${e.message}`); return []; }); s.stop('Scan done.');
       const choices = nets.slice(0, 30).map((n: any) => ({ value: n.ssid, label: `${n.ssid} (${n.signal}% · ${n.security})` }));
-      choices.push({ value: '__hidden__', label: 'Hidden network (type name)…' });
+      choices.push({ value: '__manual__', label: 'Enter network name manually…' });
       const ssidSel = await p.select({ message: 'Pick a network', options: choices });
       if (p.isCancel(ssidSel)) { p.cancel('Bye.'); return; }
       let ssid = String(ssidSel);
-      if (ssid === '__hidden__') {
-        const h = await p.text({ message: 'Hidden SSID name' });
+      if (ssid === '__manual__') {
+        const h = await p.text({ message: 'WiFi network name (SSID)' });
         if (p.isCancel(h)) { p.cancel('Bye.'); return; }
         ssid = String(h);
       }
       const pw = await p.password({ message: `Password for "${ssid}" (leave empty if open)`, mask: '•' });
       if (p.isCancel(pw)) { p.cancel('Bye.'); return; }
       const s2 = p.spinner(); s2.start(`Connecting to ${ssid}…`);
-      await ad.connect(ssid, { password: pw || undefined, hidden: ssidSel === '__hidden__' || undefined });
+      await ad.connect(ssid, { password: pw || undefined });
       s2.stop(`Connected to ${ssid}.`);
     } else if (action === 'status') {
       console.log(JSON.stringify(await ad.status(), null, 2));
@@ -63,6 +61,7 @@ export async function guided(rawArgv: string[]) {
         ? await p.select({ message: 'Edit which?', options: saved.map(s => ({ value: s.name, label: s.name })) })
         : await p.text({ message: 'Profile / SSID to edit' });
       if (p.isCancel(sel)) { p.cancel('Bye.'); return; }
+      if (ad.kind === 'macos') { p.log.warn('macOS saved-password editing is unavailable. Use connect with a password instead.'); return; }
       const npw = await p.password({ message: 'New password (empty = keep)', mask: '•' });
       if (p.isCancel(npw)) { p.cancel('Bye.'); return; }
       await ad.edit(String(sel), { newPassword: npw || undefined });

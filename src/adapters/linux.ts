@@ -11,8 +11,8 @@ export async function backend(): Promise<'nmcli' | 'iwctl' | 'none'> {
 
 export function parseNmcliWifi(t: string): Net[] {
   return t.split('\n').map(l => l.trim()).filter(Boolean).map(line => {
-    const [ssid = '', signal = '', security = '', bssid = '', freq = ''] = line.split(':');
-    return { ssid, signal: Number(signal) || 0, security: security || 'unknown', bssid: bssid || undefined, freq: freq || undefined };
+    const [ssid = '', signal = '', security = ''] = line.split(/(?<!\\):/);
+    return { ssid: ssid.replace(/\\:/g, ':'), signal: Number(signal) || 0, security: security || 'unknown' };
   }).filter(n => n.ssid);
 }
 
@@ -27,7 +27,7 @@ export const linux = {
   async scan(iface?: string, timeoutMs = 20000): Promise<Net[]> {
     const b = await backend();
     if (b === 'nmcli') {
-      const args = ['-t', '-f', 'SSID,SIGNAL,SECURITY,BSSID,FREQ', 'device', 'wifi', 'list', '--rescan', 'yes'];
+      const args = ['-t', '-f', 'SSID,SIGNAL,SECURITY', 'device', 'wifi', 'list', '--rescan', 'yes'];
       if (iface) args.push('--ifname', iface);
       const { stdout } = await run('nmcli', args, { timeoutMs });
       return parseNmcliWifi(stdout);
@@ -40,28 +40,30 @@ export const linux = {
     }
     failClosed('No supported Linux WiFi backend found (need NetworkManager nmcli or iwd iwctl)');
   },
-  async connect(ssid: string, o: { password?: string; hidden?: boolean; iface?: string; timeoutMs?: number } = {}) {
+  async connect(ssid: string, o: { password?: string; hidden?: boolean; iface?: string; timeoutMs?: number; save?: boolean } = {}) {
     if (await backend() !== 'nmcli') failClosed('Connect needs NetworkManager (nmcli); iw-only systems are scan/status only in v1');
     const args = ['device', 'wifi', 'connect', ssid];
     if (o.password) args.push('password', o.password);
     if (o.hidden) args.push('hidden', 'yes');
     if (o.iface) args.push('ifname', o.iface);
-    return run('nmcli', args, { timeoutMs: o.timeoutMs ?? 30000 });
+    if (o.save === false) failClosed('--no-save on Linux (nmcli would save the connection)');
+    return run('nmcli', args, { timeoutMs: o.timeoutMs ?? 30000, secrets: o.password ? [o.password] : [] });
   },
   async list(): Promise<Profile[]> {
     const { stdout } = await run('nmcli', ['-t', '-f', 'NAME,UUID,TYPE', 'connection', 'show']);
     return stdout.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
-      const [name = '', uuid = '', type = ''] = l.split(':');
+      const [name = '', uuid = '', type = ''] = l.split(/(?<!\\):/);
       return { name, uuid, type };
     }).filter(p => p.name && /wireless|wifi/i.test(p.type));
   },
   async status(iface?: string) {
     const b = await backend();
-    if (b === 'iwctl' || !(await which('nmcli'))) {
+    if (b === 'iwctl') {
       const dev = iface ?? await defaultStation().catch(() => iface ?? 'wlan0');
       const { stdout } = await run('iwctl', ['station', dev, 'show']);
       return { backend: 'iwctl' as const, detail: stdout.trim() };
     }
+    if (b === 'none') failClosed('No Linux WiFi backend found (install NetworkManager or iwd)');
     const [active, dev] = await Promise.all([
       run('nmcli', ['-t', '-f', 'NAME,UUID,TYPE,DEVICE', 'connection', 'show', '--active']).then(r => r.stdout).catch(() => ''),
       run('nmcli', ['-t', '-f', 'DEVICE,TYPE,STATE,CONNECTION', 'device', 'status']).then(r => r.stdout).catch(() => ''),
@@ -77,10 +79,14 @@ export const linux = {
   },
   async forget(name: string) { return run('nmcli', ['connection', 'delete', 'id', name]); },
   async edit(name: string, o: { newPassword?: string; autoconnect?: 'on' | 'off'; priority?: number; rename?: string }) {
-    if (o.newPassword) await run('nmcli', ['connection', 'modify', 'id', name, 'wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', o.newPassword]);
-    if (o.autoconnect) await run('nmcli', ['connection', 'modify', 'id', name, 'connection.autoconnect', o.autoconnect === 'on' ? 'yes' : 'no']);
-    if (o.priority !== undefined) await run('nmcli', ['connection', 'modify', 'id', name, 'connection.autoconnect-priority', String(o.priority)]);
-    if (o.rename) await run('nmcli', ['connection', 'modify', 'id', name, 'connection.id', o.rename]);
+    if (await backend() !== 'nmcli') failClosed('Edit needs NetworkManager (nmcli)');
+    const changes: string[] = [];
+    if (o.newPassword) changes.push('wifi-sec.psk', o.newPassword);
+    if (o.autoconnect) changes.push('connection.autoconnect', o.autoconnect === 'on' ? 'yes' : 'no');
+    if (o.priority !== undefined) changes.push('connection.autoconnect-priority', String(o.priority));
+    if (o.rename) changes.push('connection.id', o.rename);
+    if (!changes.length) failClosed('Nothing to edit');
+    await run('nmcli', ['connection', 'modify', 'id', name, ...changes], { secrets: o.newPassword ? [o.newPassword] : [] });
   },
   async radio(on: boolean, iface?: string) {
     void iface;
@@ -99,7 +105,7 @@ export const linux = {
       checks.push({ name: 'adapter', ok: hasWifi, hint: hasWifi ? 'WiFi adapter present.' : 'No WiFi adapter seen. Check hardware switch / USB / VM passthrough.' });
       const scan = await linux.scan().then(n => n.length).catch(() => -1);
       checks.push({ name: 'scan', ok: scan > 0, hint: scan > 0 ? `Scan works (${scan} networks).` : scan === 0 ? 'Scan works but sees nothing — move closer to the router.' : 'Scan failed — try: sudo openwifi scan' });
-      const dns = await run('sh', ['-c', 'getent hosts archlinux.org || getent hosts example.com || nslookup example.com 2>&1 | head -5']).then(() => true).catch(() => false);
+      const dns = await run('getent', ['hosts', 'example.com']).then(r => !!r.stdout.trim()).catch(() => false);
       checks.push({ name: 'dns', ok: dns, hint: dns ? 'DNS resolves.' : 'Connected but no internet/DNS — restart router, check captive portal, or run: nmcli connection show --active' });
     } else if (b === 'iwctl') {
       checks.push({ name: 'note', ok: true, hint: 'iw-only system: scan/status supported; connect/edit need NetworkManager in v1.' });
