@@ -5,12 +5,13 @@ import { adapter } from './adapters/index.js';
 import { isAuthError, sudoHint, printJson, failClosed } from './util.js';
 import { guided } from './interactive.js';
 import { requireConnectBackend } from './adapters/linux.js';
+import { upgradeFromGithub } from './upgrade.js';
 
 const program = new Command();
 program
   .name('openwifi')
   .description('Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.')
-  .version('0.1.1')
+  .version('0.1.2')
   .option('--interface <name>', 'WiFi interface (e.g. wlan0, en0)')
   .option('--timeout <sec>', 'command timeout in seconds', '25')
   .option('--json', 'machine-readable JSON output')
@@ -127,6 +128,17 @@ program.command('doctor')
   .action(async () => {
     try { const ad: any = adapter(); const checks = await ad.doctor(program.opts().interface); if (program.opts().json) printJson({ ok: true, checks }); else { console.log('Diagnosis:'); for (const c of checks) console.log(`  ${(c.ok ? '✓' : '✗')} ${c.name}: ${c.hint}`); } }
     catch (e) { handleErr(e, raw(['doctor'])); }
+  });
+
+program.command('upgrade')
+  .description('Upgrade openwifi from the public GitHub repository')
+  .action(async () => {
+    try {
+      if (!program.opts().json) console.log('Updating openwifi from GitHub…');
+      await upgradeFromGithub();
+      if (program.opts().json) printJson({ ok: true, source: 'github:tanulmittal/wifi-cli' });
+      else console.log('Update complete. Run openwifi --version to check the installed version.');
+    } catch (e) { handleErr(e, raw(['upgrade'])); }
   });
 
 // Bare `openwifi` -> guided menu (non-tech default)

@@ -3830,7 +3830,7 @@ function redact(s, args = []) {
 }
 function isAuthError(e2) {
   const s = `${e2?.message ?? ""} ${e2?.stderr ?? ""} ${e2?.stdout ?? ""}`.toLowerCase();
-  return /not authorized|permission denied|operation not permitted|requires? (root|privilege|sudo)|polkit|eperm|exit code 4\b/.test(s);
+  return /not authorized|permission denied|operation not permitted|requires? (root|privilege|sudo)|polkit|eperm|eacces|exit code 4\b/.test(s);
 }
 function sudoHint(argv) {
   const q2 = argv.filter((a3) => a3 !== "openwifi").map((a3) => /\s/.test(a3) ? JSON.stringify(a3) : a3).join(" ");
@@ -4219,9 +4219,14 @@ async function guided(rawArgv) {
   }
 }
 
+// src/upgrade.ts
+async function upgradeFromGithub() {
+  await run("npm", ["install", "-g", "github:tanulmittal/wifi-cli", "--install-links"], { timeoutMs: 3e5 });
+}
+
 // src/cli.ts
 var program2 = new Command();
-program2.name("openwifi").description("Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.").version("0.1.1").option("--interface <name>", "WiFi interface (e.g. wlan0, en0)").option("--timeout <sec>", "command timeout in seconds", "25").option("--json", "machine-readable JSON output").option("--yes", "skip confirmations (scripts)");
+program2.name("openwifi").description("Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.").version("0.1.2").option("--interface <name>", "WiFi interface (e.g. wlan0, en0)").option("--timeout <sec>", "command timeout in seconds", "25").option("--json", "machine-readable JSON output").option("--yes", "skip confirmations (scripts)");
 var tmo = () => {
   const seconds = Number(program2.opts().timeout ?? 25);
   if (!Number.isFinite(seconds) || seconds <= 0) throw new Error("--timeout must be a positive number of seconds");
@@ -4376,6 +4381,16 @@ program2.command("doctor").description("Troubleshoot: adapter, radio, scan, conn
     }
   } catch (e2) {
     handleErr(e2, raw(["doctor"]));
+  }
+});
+program2.command("upgrade").description("Upgrade openwifi from the public GitHub repository").action(async () => {
+  try {
+    if (!program2.opts().json) console.log("Updating openwifi from GitHub\u2026");
+    await upgradeFromGithub();
+    if (program2.opts().json) printJson({ ok: true, source: "github:tanulmittal/wifi-cli" });
+    else console.log("Update complete. Run openwifi --version to check the installed version.");
+  } catch (e2) {
+    handleErr(e2, raw(["upgrade"]));
   }
 });
 if (!process.argv.slice(2).length) {

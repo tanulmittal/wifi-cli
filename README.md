@@ -11,6 +11,7 @@ openwifi connect "MyWifi"
 openwifi status --json
 openwifi forget "OldWifi"
 openwifi doctor
+openwifi upgrade       # fetch and install the latest main branch from GitHub
 ```
 
 This installs directly from the public [GitHub repository](https://github.com/tanulmittal/wifi-cli). `--install-links` makes npm copy the Git package instead of linking its temporary clone (the default may leave a broken `openwifi` command). Node.js 18+ and npm are required. The installed CLI bundles its JavaScript dependencies and makes no package downloads when run.
@@ -24,6 +25,7 @@ This installs directly from the public [GitHub repository](https://github.com/ta
 - `openwifi forget|remove <profile>` (confirms unless `--yes`)
 - `openwifi edit <profile> --new-password … --autoconnect on|off --priority N --rename NAME` (NetworkManager only; macOS password changes are not supported safely yet)
 - `openwifi on | off`, `openwifi doctor [--json]`
+- `openwifi upgrade` — runs `npm install -g github:tanulmittal/wifi-cli --install-links`. Requires internet access while upgrading; no network access is needed for normal commands.
 
 Needs admin? It prints the exact `sudo openwifi …` re-run — never auto-elevates. Passwords use hidden prompts, system stores only (NetworkManager / Keychain), never logged.
 

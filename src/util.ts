@@ -42,7 +42,7 @@ export function redact(s: string, args: string[] = []): string {
 
 export function isAuthError(e: any): boolean {
   const s = `${e?.message ?? ''} ${e?.stderr ?? ''} ${e?.stdout ?? ''}`.toLowerCase();
-  return /not authorized|permission denied|operation not permitted|requires? (root|privilege|sudo)|polkit|eperm|exit code 4\b/.test(s);
+  return /not authorized|permission denied|operation not permitted|requires? (root|privilege|sudo)|polkit|eperm|eacces|exit code 4\b/.test(s);
 }
 
 export function sudoHint(argv: string[]): string {

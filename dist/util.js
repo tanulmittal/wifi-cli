@@ -39,7 +39,7 @@ export function redact(s, args = []) {
 }
 export function isAuthError(e) {
     const s = `${e?.message ?? ''} ${e?.stderr ?? ''} ${e?.stdout ?? ''}`.toLowerCase();
-    return /not authorized|permission denied|operation not permitted|requires? (root|privilege|sudo)|polkit|eperm|exit code 4\b/.test(s);
+    return /not authorized|permission denied|operation not permitted|requires? (root|privilege|sudo)|polkit|eperm|eacces|exit code 4\b/.test(s);
 }
 export function sudoHint(argv) {
     const q = argv.filter(a => a !== 'openwifi').map(a => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ');
