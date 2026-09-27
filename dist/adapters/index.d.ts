@@ -12,6 +12,19 @@ export declare function adapter(): {
     status(iface?: string): Promise<{
         backend: "iwctl";
         detail: string;
+        state?: undefined;
+        ssid?: undefined;
+        bssid?: undefined;
+        frequency?: undefined;
+        active?: undefined;
+        devices?: undefined;
+    } | {
+        backend: "wpa_cli";
+        state: any;
+        ssid: any;
+        bssid: any;
+        frequency: any;
+        detail?: undefined;
         active?: undefined;
         devices?: undefined;
     } | {
@@ -19,6 +32,10 @@ export declare function adapter(): {
         active: string;
         devices: string;
         detail?: undefined;
+        state?: undefined;
+        ssid?: undefined;
+        bssid?: undefined;
+        frequency?: undefined;
     }>;
     disconnect(iface?: string): Promise<import("../util.js").RunResult>;
     forget(name: string): Promise<import("../util.js").RunResult>;
@@ -29,7 +46,7 @@ export declare function adapter(): {
         rename?: string;
     }): Promise<void>;
     radio(on: boolean, iface?: string): Promise<import("../util.js").RunResult>;
-    doctor(): Promise<{
+    doctor(iface?: string): Promise<{
         name: string;
         ok: boolean;
         hint: string;

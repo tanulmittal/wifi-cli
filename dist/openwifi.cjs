@@ -3845,16 +3845,24 @@ function failClosed(msg) {
 }
 
 // src/adapters/linux.ts
+var import_promises = require("node:timers/promises");
 async function backend() {
   if (await which("nmcli")) return "nmcli";
   if (await which("iwctl")) return "iwctl";
+  if (await which("wpa_cli")) return "wpa_cli";
   return "none";
 }
 async function requireConnectBackend() {
   const found = await backend();
   if (found === "nmcli") return;
-  if (found === "iwctl") failClosed("Connecting needs NetworkManager (nmcli); this system only has iwctl");
-  failClosed("No WiFi manager found. Run openwifi doctor. This server needs NetworkManager (nmcli) for connections");
+  if (found === "iwctl" || found === "wpa_cli") failClosed(`Connecting needs NetworkManager (nmcli); ${found} supports scan/status only. If this is a remote server, do not replace its active network manager over SSH`);
+  failClosed("No WiFi manager found. Run openwifi doctor. Connecting needs NetworkManager (nmcli)");
+}
+async function requireNmcli(action) {
+  if (await backend() !== "nmcli") failClosed(`${action} needs NetworkManager (nmcli); this system's WiFi settings may be managed by Netplan or another service`);
+}
+function wpaArgs(iface, command) {
+  return iface ? ["-i", iface, command] : [command];
 }
 function parseNmcliWifi(t) {
   return t.split("\n").map((l2) => l2.trim()).filter(Boolean).map((line) => {
@@ -3867,6 +3875,15 @@ function parseIwNetworks(t) {
     const m2 = line.match(/^(\S(?:.*\S)?)\s+(open|psk|sae|owe|802\.1x.*)?\s*$/i);
     return m2 ? { ssid: m2[1].trim(), signal: 0, security: (m2[2] || "unknown").trim() } : null;
   }).filter((x2) => !!x2 && !!x2.ssid);
+}
+function parseWpaResults(t) {
+  return t.split("\n").slice(1).map((line) => {
+    const [bssid, freq, level, flags, ...ssidParts] = line.replace(/\r$/, "").split("	");
+    const ssid = ssidParts.join("	");
+    if (!ssid || !bssid || !Number.isFinite(Number(level))) return null;
+    const signal = Math.max(0, Math.min(100, 2 * (Number(level) + 100)));
+    return { ssid, signal, security: flags || "open", bssid, freq };
+  }).filter((n) => n !== null);
 }
 var linux = {
   async scan(iface, timeoutMs = 2e4) {
@@ -3883,7 +3900,14 @@ var linux = {
       const { stdout } = await run("iwctl", ["station", dev, "get-networks"], { timeoutMs });
       return parseIwNetworks(stdout);
     }
-    failClosed("No supported Linux WiFi backend found (need NetworkManager nmcli or iwd iwctl)");
+    if (b3 === "wpa_cli") {
+      const { stdout: requested } = await run("wpa_cli", wpaArgs(iface, "scan"), { timeoutMs });
+      if (!requested.trim().endsWith("OK")) throw new Error("WiFi scan was refused by wpa_supplicant. Try again after the current scan finishes.");
+      await (0, import_promises.setTimeout)(1500);
+      const { stdout } = await run("wpa_cli", wpaArgs(iface, "scan_results"), { timeoutMs });
+      return parseWpaResults(stdout);
+    }
+    failClosed("No supported Linux WiFi backend found (need nmcli, iwctl, or wpa_cli)");
   },
   async connect(ssid, o = {}) {
     await requireConnectBackend();
@@ -3895,6 +3919,7 @@ var linux = {
     return run("nmcli", args, { timeoutMs: o.timeoutMs ?? 3e4, secrets: o.password ? [o.password] : [] });
   },
   async list() {
+    await requireNmcli("Listing saved networks");
     const { stdout } = await run("nmcli", ["-t", "-f", "NAME,UUID,TYPE", "connection", "show"]);
     return stdout.split("\n").map((l2) => l2.trim()).filter(Boolean).map((l2) => {
       const [name = "", uuid = "", type = ""] = l2.split(/(?<!\\):/);
@@ -3908,6 +3933,12 @@ var linux = {
       const { stdout } = await run("iwctl", ["station", dev2, "show"]);
       return { backend: "iwctl", detail: stdout.trim() };
     }
+    if (b3 === "wpa_cli") {
+      const { stdout } = await run("wpa_cli", wpaArgs(iface, "status"));
+      const values = Object.fromEntries(stdout.split("\n").map((line) => line.split(/=(.*)/s).slice(0, 2)).filter((pair) => pair.length === 2));
+      if (!values.wpa_state) throw new Error("Could not read wpa_supplicant status. Try: sudo openwifi status --interface <WiFi interface>");
+      return { backend: "wpa_cli", state: values.wpa_state, ssid: values.ssid ?? "", bssid: values.bssid ?? "", frequency: values.freq ?? "" };
+    }
     if (b3 === "none") failClosed("No Linux WiFi backend found (install NetworkManager or iwd)");
     const [active, dev] = await Promise.all([
       run("nmcli", ["-t", "-f", "NAME,UUID,TYPE,DEVICE", "connection", "show", "--active"]).then((r2) => r2.stdout).catch(() => ""),
@@ -3916,6 +3947,7 @@ var linux = {
     return { backend: "nmcli", active: active.trim(), devices: dev.trim() };
   },
   async disconnect(iface) {
+    await requireNmcli("Disconnect");
     if (iface) return run("nmcli", ["device", "disconnect", iface]);
     const { stdout } = await run("nmcli", ["-t", "-f", "DEVICE,TYPE,STATE", "device", "status"]);
     const wifi = stdout.split("\n").find((l2) => /:wifi:/i.test(l2))?.split(":")[0];
@@ -3923,6 +3955,7 @@ var linux = {
     return run("nmcli", ["device", "disconnect", wifi]);
   },
   async forget(name) {
+    await requireNmcli("Forget");
     return run("nmcli", ["connection", "delete", "id", name]);
   },
   async edit(name, o) {
@@ -3936,10 +3969,11 @@ var linux = {
     await run("nmcli", ["connection", "modify", "id", name, ...changes], { secrets: o.newPassword ? [o.newPassword] : [] });
   },
   async radio(on, iface) {
+    await requireNmcli("Changing radio power");
     void iface;
     return run("nmcli", ["radio", "wifi", on ? "on" : "off"]);
   },
-  async doctor() {
+  async doctor(iface) {
     const checks = [];
     const b3 = await backend();
     checks.push({ name: "backend", ok: b3 !== "none", hint: b3 === "none" ? "No WiFi manager found. Check for a WiFi adapter with: ip -br link. Connecting needs NetworkManager (nmcli). On a remote server, check its network configuration before installing or starting a network service." : `Using ${b3}.` });
@@ -3956,6 +3990,10 @@ var linux = {
       checks.push({ name: "dns", ok: dns, hint: dns ? "DNS resolves." : "Connected but no internet/DNS \u2014 restart router, check captive portal, or run: nmcli connection show --active" });
     } else if (b3 === "iwctl") {
       checks.push({ name: "note", ok: true, hint: "iw-only system: scan/status supported; connect/edit need NetworkManager in v1." });
+    } else if (b3 === "wpa_cli") {
+      const connected = await linux.status(iface).then((s) => "state" in s && s.state === "COMPLETED").catch(() => false);
+      checks.push({ name: "connection", ok: connected, hint: connected ? "WiFi is connected through wpa_supplicant." : "Could not confirm WiFi status. Try: sudo openwifi doctor --interface <WiFi interface>" });
+      checks.push({ name: "note", ok: true, hint: "Scan/status supported. Connect, saved networks, edit, and forget need NetworkManager; do not replace the active network service over SSH." });
     }
     return checks;
   }
@@ -4226,7 +4264,7 @@ async function upgradeFromGithub() {
 
 // src/cli.ts
 var program2 = new Command();
-program2.name("openwifi").description("Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.").version("0.1.2").option("--interface <name>", "WiFi interface (e.g. wlan0, en0)").option("--timeout <sec>", "command timeout in seconds", "25").option("--json", "machine-readable JSON output").option("--yes", "skip confirmations (scripts)");
+program2.name("openwifi").description("Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.").version("0.1.3").option("--interface <name>", "WiFi interface (e.g. wlan0, en0)").option("--timeout <sec>", "command timeout in seconds", "25").option("--json", "machine-readable JSON output").option("--yes", "skip confirmations (scripts)");
 var tmo = () => {
   const seconds = Number(program2.opts().timeout ?? 25);
   if (!Number.isFinite(seconds) || seconds <= 0) throw new Error("--timeout must be a positive number of seconds");

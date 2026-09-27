@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseNmcliWifi, parseIwNetworks } from '../src/adapters/linux.js';
+import { parseNmcliWifi, parseIwNetworks, parseWpaResults } from '../src/adapters/linux.js';
 import { parseAirport } from '../src/adapters/macos.js';
 import { redact, isAuthError, sudoHint } from '../src/util.js';
 
@@ -21,6 +21,11 @@ test('airport parse maps RSSI to 0-100', () => {
 test('iw parse basic', () => {
   const nets = parseIwNetworks('MyWifi psk\nOpenNet open');
   assert.equal(nets.length, 2);
+});
+
+test('wpa scan results keep SSIDs with spaces and security flags', () => {
+  const nets = parseWpaResults('bssid / frequency / signal level / flags / ssid\naa:bb:cc:dd:ee:ff\t2412\t-55\t[WPA2-PSK-CCMP][ESS]\tMy Home WiFi\n');
+  assert.deepEqual(nets, [{ ssid: 'My Home WiFi', signal: 90, security: '[WPA2-PSK-CCMP][ESS]', bssid: 'aa:bb:cc:dd:ee:ff', freq: '2412' }]);
 });
 
 test('redact + auth detection + sudo hint', () => {
@@ -118,5 +123,32 @@ test('missing Linux backend blocks connection before asking for credentials or c
     await assert.rejects(requireConnectBackend(), /No WiFi manager found/);
     await assert.rejects(linux.connect('Example', { password: 'secret' }), /No WiFi manager found/);
     assert.ok(calls.every(c => c.startsWith('which ')));
+  } finally { setRunner(null); }
+});
+
+test('wpa_supplicant is detected for status/scan and writes fail before changing state', async () => {
+  const calls: string[][] = [];
+  setRunner(async (cmd, args) => {
+    calls.push([cmd, ...args]);
+    if (cmd === 'which') {
+      if (args[0] === 'wpa_cli') return { stdout: '/usr/sbin/wpa_cli', stderr: '' };
+      throw new Error('missing');
+    }
+    if (args.includes('status')) return { stdout: 'ssid=My Home\nwpa_state=COMPLETED\n', stderr: '' };
+    if (args.includes('scan_results')) return { stdout: 'bssid / frequency / signal level / flags / ssid\naa:bb:cc:dd:ee:ff\t2412\t-60\t[WPA2-PSK]\tMy Home\n', stderr: '' };
+    if (args.includes('scan')) return { stdout: 'OK\n', stderr: '' };
+    throw new Error(`Unexpected command: ${cmd}`);
+  });
+  try {
+    assert.deepEqual(await linux.status('wlp2s0'), { backend: 'wpa_cli', state: 'COMPLETED', ssid: 'My Home', bssid: '', frequency: '' });
+    assert.equal((await linux.scan('wlp2s0'))[0].ssid, 'My Home');
+    const checks = await linux.doctor('wlp2s0');
+    assert.equal(checks.find(c => c.name === 'connection')?.ok, true);
+    await assert.rejects(linux.connect('Other', { password: 'secret' }), /Connecting needs NetworkManager/);
+    await assert.rejects(linux.list(), /Listing saved networks needs NetworkManager/);
+    await assert.rejects(linux.disconnect('wlp2s0'), /Disconnect needs NetworkManager/);
+    await assert.rejects(linux.forget('My Home'), /Forget needs NetworkManager/);
+    await assert.rejects(linux.radio(false), /Changing radio power needs NetworkManager/);
+    assert.equal(calls.filter(([cmd]) => cmd !== 'which' && cmd !== 'wpa_cli').length, 0);
   } finally { setRunner(null); }
 });
