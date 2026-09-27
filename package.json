@@ -17,8 +17,7 @@
     "build": "tsc",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
-    "test": "tsx --test tests/*.test.ts",
-    "prepare": "node scripts/prepare.mjs"
+    "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "@clack/prompts": "^0.8.1",
