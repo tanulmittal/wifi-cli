@@ -29,7 +29,7 @@ test('redact + auth detection + sudo hint', () => {
   assert.match(sudoHint(['connect', 'My Wifi']), /sudo openwifi/);
 });
 
-import { linux } from '../src/adapters/linux.js';
+import { linux, requireConnectBackend } from '../src/adapters/linux.js';
 import { macos, parseSystemProfiler } from '../src/adapters/macos.js';
 import { setRunner } from '../src/util.js';
 
@@ -106,4 +106,17 @@ test('mac command paths build expected networksetup invocations', async () => {
 test('system profiler ignores redacted SSIDs', () => {
   const input = JSON.stringify({ SPAirPortDataType: [{ spairport_airport_interfaces: [{ _name: 'en0', spairport_airport_other_local_wireless_networks: [{ _name: '<redacted>' }] }] }] });
   assert.deepEqual(parseSystemProfiler(input, 'en0'), []);
+});
+
+test('missing Linux backend blocks connection before asking for credentials or changing state', async () => {
+  const calls: string[] = [];
+  setRunner(async (cmd, args) => {
+    calls.push(`${cmd} ${args.join(' ')}`);
+    throw new Error('command not found');
+  });
+  try {
+    await assert.rejects(requireConnectBackend(), /No WiFi manager found/);
+    await assert.rejects(linux.connect('Example', { password: 'secret' }), /No WiFi manager found/);
+    assert.ok(calls.every(c => c.startsWith('which ')));
+  } finally { setRunner(null); }
 });

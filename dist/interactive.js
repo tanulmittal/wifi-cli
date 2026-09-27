@@ -1,6 +1,7 @@
 import * as p from '@clack/prompts';
 import { adapter } from './adapters/index.js';
 import { isAuthError, sudoHint } from './util.js';
+import { requireConnectBackend } from './adapters/linux.js';
 export async function guided(rawArgv) {
     p.intro('openwifi — friendly WiFi manager');
     const ad = adapter();
@@ -31,6 +32,8 @@ export async function guided(rawArgv) {
                 console.log(`  ${String(n.signal).padStart(3)}%  ${n.ssid}  (${n.security})`);
         }
         else if (action === 'connect') {
+            if (ad.kind === 'linux')
+                await requireConnectBackend();
             const s = p.spinner();
             s.start('Scanning…');
             const nets = await ad.scan().catch((e) => { p.log.warn(`Scan unavailable: ${e.message}`); return []; });
@@ -58,8 +61,14 @@ export async function guided(rawArgv) {
             }
             const s2 = p.spinner();
             s2.start(`Connecting to ${ssid}…`);
-            await ad.connect(ssid, { password: pw || undefined });
-            s2.stop(`Connected to ${ssid}.`);
+            try {
+                await ad.connect(ssid, { password: pw || undefined });
+                s2.stop(`Connected to ${ssid}.`);
+            }
+            catch (e) {
+                s2.stop(`Could not connect to ${ssid}.`);
+                throw e;
+            }
         }
         else if (action === 'status') {
             console.log(JSON.stringify(await ad.status(), null, 2));

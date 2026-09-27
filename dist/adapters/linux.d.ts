@@ -11,6 +11,7 @@ export type Profile = {
     type?: string;
 };
 export declare function backend(): Promise<'nmcli' | 'iwctl' | 'none'>;
+export declare function requireConnectBackend(): Promise<void>;
 export declare function parseNmcliWifi(t: string): Net[];
 export declare function parseIwNetworks(t: string): Net[];
 export declare const linux: {

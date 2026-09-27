@@ -1,6 +1,7 @@
 import * as p from '@clack/prompts';
 import { adapter } from './adapters/index.js';
 import { isAuthError, sudoHint } from './util.js';
+import { requireConnectBackend } from './adapters/linux.js';
 
 export async function guided(rawArgv: string[]) {
   p.intro('openwifi — friendly WiFi manager');
@@ -25,6 +26,7 @@ export async function guided(rawArgv: string[]) {
       const nets = await ad.scan(); s.stop(`Found ${nets.length} network(s).`);
       for (const n of nets.slice(0, 25)) console.log(`  ${String(n.signal).padStart(3)}%  ${n.ssid}  (${n.security})`);
     } else if (action === 'connect') {
+      if (ad.kind === 'linux') await requireConnectBackend();
       const s = p.spinner(); s.start('Scanning…');
       const nets = await ad.scan().catch((e: Error) => { p.log.warn(`Scan unavailable: ${e.message}`); return []; }); s.stop('Scan done.');
       const choices = nets.slice(0, 30).map((n: any) => ({ value: n.ssid, label: `${n.ssid} (${n.signal}% · ${n.security})` }));
@@ -40,8 +42,13 @@ export async function guided(rawArgv: string[]) {
       const pw = await p.password({ message: `Password for "${ssid}" (leave empty if open)`, mask: '•' });
       if (p.isCancel(pw)) { p.cancel('Bye.'); return; }
       const s2 = p.spinner(); s2.start(`Connecting to ${ssid}…`);
-      await ad.connect(ssid, { password: pw || undefined });
-      s2.stop(`Connected to ${ssid}.`);
+      try {
+        await ad.connect(ssid, { password: pw || undefined });
+        s2.stop(`Connected to ${ssid}.`);
+      } catch (e) {
+        s2.stop(`Could not connect to ${ssid}.`);
+        throw e;
+      }
     } else if (action === 'status') {
       console.log(JSON.stringify(await ad.status(), null, 2));
     } else if (action === 'list') {

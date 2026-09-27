@@ -9,6 +9,13 @@ export async function backend(): Promise<'nmcli' | 'iwctl' | 'none'> {
   return 'none';
 }
 
+export async function requireConnectBackend(): Promise<void> {
+  const found = await backend();
+  if (found === 'nmcli') return;
+  if (found === 'iwctl') failClosed('Connecting needs NetworkManager (nmcli); this system only has iwctl');
+  failClosed('No WiFi manager found. Run openwifi doctor. This server needs NetworkManager (nmcli) for connections');
+}
+
 export function parseNmcliWifi(t: string): Net[] {
   return t.split('\n').map(l => l.trim()).filter(Boolean).map(line => {
     const [ssid = '', signal = '', security = ''] = line.split(/(?<!\\):/);
@@ -41,7 +48,7 @@ export const linux = {
     failClosed('No supported Linux WiFi backend found (need NetworkManager nmcli or iwd iwctl)');
   },
   async connect(ssid: string, o: { password?: string; hidden?: boolean; iface?: string; timeoutMs?: number; save?: boolean } = {}) {
-    if (await backend() !== 'nmcli') failClosed('Connect needs NetworkManager (nmcli); iw-only systems are scan/status only in v1');
+    await requireConnectBackend();
     const args = ['device', 'wifi', 'connect', ssid];
     if (o.password) args.push('password', o.password);
     if (o.hidden) args.push('hidden', 'yes');
@@ -95,7 +102,7 @@ export const linux = {
   async doctor() {
     const checks: { name: string; ok: boolean; hint: string }[] = [];
     const b = await backend();
-    checks.push({ name: 'backend', ok: b !== 'none', hint: b === 'none' ? 'Install NetworkManager (nmcli) or iwd (iwctl).' : `Using ${b}.` });
+    checks.push({ name: 'backend', ok: b !== 'none', hint: b === 'none' ? 'No WiFi manager found. Check for a WiFi adapter with: ip -br link. Connecting needs NetworkManager (nmcli). On a remote server, check its network configuration before installing or starting a network service.' : `Using ${b}.` });
     if (b === 'nmcli') {
       const g = await run('nmcli', ['general', 'status']).then(r => r.stdout).catch(() => '');
       const radioOff = /disabled/i.test(g);

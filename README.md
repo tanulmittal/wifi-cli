@@ -13,7 +13,7 @@ openwifi forget "OldWifi"
 openwifi doctor
 ```
 
-This installs directly from the public [GitHub repository](https://github.com/tanulmittal/wifi-cli). `--install-links` makes npm copy the Git package instead of linking its temporary clone (the default may leave a broken `openwifi` command). Node.js 18+ and npm are required; no npm registry release is needed.
+This installs directly from the public [GitHub repository](https://github.com/tanulmittal/wifi-cli). `--install-links` makes npm copy the Git package instead of linking its temporary clone (the default may leave a broken `openwifi` command). Node.js 18+ and npm are required. The installed CLI bundles its JavaScript dependencies and makes no package downloads when run.
 
 ## Commands
 
@@ -29,12 +29,12 @@ Needs admin? It prints the exact `sudo openwifi …` re-run — never auto-eleva
 
 ## Platform notes
 
-- Linux: NetworkManager `nmcli` for full use; `iwctl`-only systems get scan/status + a clear upgrade hint.
+- Linux: NetworkManager `nmcli` is required to connect, edit, and manage saved networks. `iwctl`-only systems get scan/status. These are operating-system WiFi services, not JavaScript dependencies; the CLI cannot provide a WiFi radio or safely install/activate a system service on a remote server. Run `openwifi doctor` if the manager is missing. On a remote server, check that it has a WiFi adapter (`ip -br link`) and how its network is managed before installing or starting NetworkManager; changing a server's network service can cut off SSH access.
 - macOS: `networksetup` + system profiler scan fallback; allow Location Services for your terminal if names are hidden. This macOS version has no `airport` executable, so `disconnect` explains the limitation instead of switching WiFi off and on.
 - v1 skips: Windows, enterprise EAP UI, static IP/DNS, band pinning (fail closed with guidance).
 
 ## Dev
 
 ```sh
-npm install; npm run build; npm test; node dist/cli.js --help
+npm install; npm run build; npm test; node dist/openwifi.cjs --help
 ```

@@ -4,6 +4,7 @@ import * as p from '@clack/prompts';
 import { adapter } from './adapters/index.js';
 import { isAuthError, sudoHint, printJson, failClosed } from './util.js';
 import { guided } from './interactive.js';
+import { requireConnectBackend } from './adapters/linux.js';
 
 const program = new Command();
 program
@@ -47,6 +48,7 @@ program.command('connect <ssid>')
   .option('--no-save', 'unsupported in v1; exits before changing anything')
   .action(async (ssid, opts) => {
     try {
+      if (process.platform === 'linux') await requireConnectBackend();
       let pw = opts.password;
       if (pw === undefined && process.stdin.isTTY) {
         const v = await p.password({ message: `Password for "${ssid}" (empty if open)`, mask: '•' });
