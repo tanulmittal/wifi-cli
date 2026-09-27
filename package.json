@@ -19,7 +19,7 @@
     "start": "node dist/cli.js",
     "test": "tsx --test tests/*.test.ts",
     "prepublishOnly": "npm run build",
-    "prepare": "npm run build"
+    "prepare": "node scripts/prepare.mjs || npm run build"
   },
   "dependencies": {
     "@clack/prompts": "^0.8.1",
