@@ -1,6 +1,7 @@
 import { run, which, failClosed } from '../util.js';
 import { setTimeout as delay } from 'node:timers/promises';
-import { connectNetplan, editNetplan, forgetNetplan, isOpenwifiProfile, parseWpaNetworks, requireNetplanForget } from './netplan.js';
+import { connectNetplan, editNetplan, forgetNetplan, isOpenwifiProfile, leftoverCandidates, parseWpaNetworks, repairGeneratedConf, requireNetplanForget, ungeneratedSsids, useNetplan, wifiInterface } from './netplan.js';
+import { trialStateDir } from '../trial.js';
 import { decodeWpaSsid, validWpaSsid } from './wpa.js';
 import { readlink } from 'node:fs/promises';
 import { basename } from 'node:path';
@@ -91,6 +92,17 @@ export const linux = {
     if (o.iface) args.push('ifname', o.iface);
     if (o.save === false) failClosed('--no-save on Linux (nmcli would save the connection)');
     return run('nmcli', args, { timeoutMs: o.timeoutMs ?? 30000, secrets: o.password ? [o.password] : [] });
+  },
+  async use(ssid: string, iface?: string) {
+    if (await backend() === 'wpa_cli' && await which('netplan')) return useNetplan(ssid, iface);
+    await requireNmcli('Switching to a saved network');
+    await run('nmcli', ['connection', 'up', 'id', ssid]);
+    return { ssid };
+  },
+  // Only Netplan needs this: it is the backend whose generated /run files can disagree with /etc.
+  async repair(iface?: string) {
+    if (await backend() === 'wpa_cli' && await which('netplan')) return repairGeneratedConf(await wifiInterface(iface));
+    return { removed: [] as string[], remaining: [] as string[] };
   },
   async list(iface?: string): Promise<Profile[]> {
     if (await backend() === 'wpa_cli') {
@@ -202,8 +214,15 @@ export const linux = {
     } else if (b === 'wpa_cli') {
       const connected = await linux.status(iface).then(s => 'state' in s && s.state === 'COMPLETED').catch(() => false);
       checks.push({ name: 'connection', ok: connected, hint: connected ? 'WiFi is connected through wpa_supplicant.' : 'Could not confirm WiFi status. Try: sudo openwifi doctor --interface <WiFi interface>' });
+      const device = iface ?? await wifiInterface().catch(() => undefined);
+      if (device) {
+        const extras = await ungeneratedSsids(device).catch(() => []);
+        checks.push({ name: 'generated-config', ok: !extras.length, hint: extras.length ? `The generated WiFi config still lists ${extras.map(s => `"${s}"`).join(', ')}, which the saved Netplan config does not: an unfinished trial did not roll back. Repair with: sudo openwifi doctor --fix` : 'Generated WiFi config matches the saved Netplan configuration.' });
+        const leftovers = await leftoverCandidates().catch(() => []);
+        if (leftovers.length) checks.push({ name: 'trial-files', ok: false, hint: `${leftovers.length} unfinished trial file(s) remain in ${trialStateDir()}: ${leftovers.join(', ')}. Re-run the connect or delete them.` });
+      }
       const hasNetplan = await which('netplan');
-      checks.push({ name: 'note', ok: hasNetplan, hint: hasNetplan ? 'Netplan can trial new networks with sudo and physical console access. Edit supports password and SSID changes; forget supports inactive profiles.' : 'Scan/status supported. Connecting needs Netplan or NetworkManager.' });
+      checks.push({ name: 'note', ok: hasNetplan, hint: hasNetplan ? 'Netplan can trial new networks; the trial now runs in the background so an SSH drop cannot cancel it. Switch back with: openwifi use <ssid>. Edit supports password and SSID changes; forget supports inactive profiles.' : 'Scan/status supported. Connecting needs Netplan or NetworkManager.' });
     }
     return checks;
   },

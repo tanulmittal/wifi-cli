@@ -23,7 +23,21 @@ export declare const linux: {
         iface?: string;
         timeoutMs?: number;
         save?: boolean;
-    }): Promise<void | import("../util.js").RunResult>;
+    }): Promise<import("../util.js").RunResult | import("../trial.js").TrialState>;
+    use(ssid: string, iface?: string): Promise<{
+        ssid: string;
+        id: string;
+    } | {
+        ssid: string;
+    }>;
+    repair(iface?: string): Promise<{
+        removed: string[];
+        remaining: string[];
+        files: string[];
+    } | {
+        removed: string[];
+        remaining: string[];
+    }>;
     list(iface?: string): Promise<Profile[]>;
     status(iface?: string): Promise<{
         backend: "iwctl";

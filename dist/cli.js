@@ -6,11 +6,14 @@ import { isAuthError, sudoHint, printJson, failClosed } from './util.js';
 import { guided, confirmRemoteWifiSwitch } from './interactive.js';
 import { backend, requireConnectBackend } from './adapters/linux.js';
 import { upgradeFromGithub } from './upgrade.js';
+import { recordTrialFailure, runConnectTrial } from './adapters/netplan.js';
+import { followTrial, isTrialDone, readTrialState, TRIAL_FOLLOW_MS } from './trial.js';
+import { VERSION } from './version.js';
 const program = new Command();
 program
     .name('openwifi')
     .description('Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.')
-    .version('0.2.0-beta.7')
+    .version(VERSION)
     .option('--interface <name>', 'WiFi interface (e.g. wlan0, en0)')
     .option('--timeout <sec>', 'command timeout in seconds', '25')
     .option('--json', 'machine-readable JSON output')
@@ -54,10 +57,14 @@ program.command('scan')
 program.command('connect <ssid>')
     .description('Connect to a WiFi network (prompts for password if needed)')
     .option('-p, --password <pw>', 'password (prefer interactive prompt; shell history risk)')
+    .option('--password-stdin', 'read the password from standard input')
     .option('--hidden', 'hidden SSID')
     .option('--no-save', 'unsupported in v1; exits before changing anything')
+    .option('--no-follow', 'start a Netplan trial in the background and return immediately')
     .action(async (ssid, opts) => {
     try {
+        if (opts.password !== undefined && opts.passwordStdin)
+            failClosed('Use either --password or --password-stdin, not both');
         if (process.platform === 'linux')
             await requireConnectBackend();
         if (process.platform === 'linux' && await backend() === 'wpa_cli' && !program.opts().yes) {
@@ -69,7 +76,9 @@ program.command('connect <ssid>')
             }
         }
         let pw = opts.password;
-        if (pw === undefined && process.stdin.isTTY) {
+        if (opts.passwordStdin)
+            pw = (await readStdin()).replace(/\r?\n$/, '') || undefined;
+        else if (pw === undefined && process.stdin.isTTY) {
             const v = await p.password({ message: `Password for "${ssid}" (empty if open)`, mask: '•' });
             if (p.isCancel(v)) {
                 console.log('Cancelled.');
@@ -78,7 +87,9 @@ program.command('connect <ssid>')
             pw = String(v) || undefined;
         }
         const ad = adapter();
-        await ad.connect(ssid, { password: pw, hidden: !!opts.hidden, iface: program.opts().interface, timeoutMs: tmo(), save: opts.save });
+        const outcome = await ad.connect(ssid, { password: pw, hidden: !!opts.hidden, iface: program.opts().interface, timeoutMs: tmo(), save: opts.save });
+        if (outcome?.stateFile)
+            return await reportTrial(ssid, outcome, opts.follow !== false);
         if (program.opts().json)
             printJson({ ok: true, ssid });
         else
@@ -113,13 +124,35 @@ program.command('status')
     try {
         const ad = adapter();
         const st = await ad.status(program.opts().interface);
+        const trial = await readTrialState();
         if (program.opts().json)
-            printJson({ ok: true, status: st });
-        else
+            printJson({ ok: true, status: st, ...(trial ? { trial } : {}) });
+        else {
             console.log(JSON.stringify(st, null, 2));
+            if (trial)
+                console.log(`\nLast connect trial: ${trial.phase} for "${trial.ssid}"${trial.error ? ` — ${trial.error}` : ''}\nState: ${trial.stateFile}\nLog:   ${trial.logFile}`);
+        }
     }
     catch (e) {
         handleErr(e, raw(['status']));
+    }
+});
+program.command('use <ssid>')
+    .description('Switch to a saved network without changing configuration')
+    .action(async (ssid) => {
+    try {
+        if (!await confirmLinkLoss('Switching network may drop SSH until the new association completes. Continue?'))
+            return;
+        const ad = adapter();
+        const result = await ad.use(ssid, program.opts().interface);
+        const unverified = result?.verified === false;
+        if (program.opts().json)
+            printJson({ ok: true, ...(result ?? { ssid }), ...(unverified ? { verified: false } : {}) });
+        else
+            console.log(unverified ? `Asked macOS to switch to "${ssid}", but it does not report the network name. Check with: openwifi status` : `Switched to "${ssid}".`);
+    }
+    catch (e) {
+        handleErr(e, raw(['use', ssid]));
     }
 });
 program.command('disconnect')
@@ -214,6 +247,49 @@ async function confirmLinkLoss(message) {
     const answer = await p.confirm({ message });
     return !p.isCancel(answer) && answer === true;
 }
+async function readStdin() {
+    const chunks = [];
+    for await (const chunk of process.stdin)
+        chunks.push(Buffer.from(chunk));
+    return Buffer.concat(chunks).toString('utf8');
+}
+// The Netplan trial runs in a detached worker, so this only reports what that worker recorded. When
+// SSH drops mid-trial the worker keeps running and a later `openwifi status` shows the outcome.
+async function reportTrial(ssid, initial, follow) {
+    const json = !!program.opts().json;
+    if (initial.alreadyConnected) {
+        if (json)
+            printJson({ ok: true, ssid, trial: initial });
+        else
+            console.log(`Already connected to "${ssid}".`);
+        return;
+    }
+    if (!follow) {
+        if (json)
+            printJson({ ok: true, ssid, pending: true, trialId: initial.pid, stateFile: initial.stateFile, trial: initial });
+        else
+            console.log(`Trying "${ssid}" in the background.\nSSH may drop now; that is expected. Reconnect and run: openwifi status\nState: ${initial.stateFile}\nLog:   ${initial.logFile}`);
+        return;
+    }
+    if (!json)
+        console.log(`Trying "${ssid}" for up to 90 seconds. SSH may drop; the background trial keeps running either way.`);
+    const { state, timedOut } = await followTrial({ timeoutMs: TRIAL_FOLLOW_MS });
+    if (timedOut) {
+        if (json)
+            printJson({ ok: true, ssid, pending: true, trialId: initial.pid, stateFile: initial.stateFile, trial: state });
+        else
+            console.log(`The trial is still running. Reconnect and run: openwifi status\nState: ${initial.stateFile}`);
+        return;
+    }
+    if (isTrialDone(state) && state?.phase === 'ok') {
+        if (json)
+            printJson({ ok: true, ssid, saved: state.saved !== false, trialId: state.pid, stateFile: state.stateFile, trial: state });
+        else
+            console.log(state.saved === false ? `Connected to "${ssid}".` : `Connected to "${ssid}". Saved for reboot.`);
+        return;
+    }
+    throw new Error(state?.error ?? 'The trial rolled back; the previous connection is unchanged.');
+}
 program.command('on').description('Turn WiFi on').action(async () => { try {
     const ad = adapter();
     await ad.radio(true, program.opts().interface);
@@ -240,16 +316,45 @@ catch (e) {
 } });
 program.command('doctor')
     .description('Troubleshoot: adapter, radio, scan, connection, DNS with fix hints')
-    .action(async () => {
+    .option('--fix', 'repair generated WiFi configuration left behind by an unfinished trial')
+    .action(async (opts) => {
     try {
         const ad = adapter();
-        const checks = await ad.doctor(program.opts().interface);
-        if (program.opts().json)
-            printJson({ ok: true, checks });
+        const json = !!program.opts().json;
+        let checks = await ad.doctor(program.opts().interface);
+        const print = (list) => { if (json)
+            printJson({ ok: true, checks: list });
         else {
             console.log('Diagnosis:');
-            for (const c of checks)
+            for (const c of list)
                 console.log(`  ${(c.ok ? '✓' : '✗')} ${c.name}: ${c.hint}`);
+        } };
+        if (!opts.fix) {
+            print(checks);
+            return;
+        }
+        if (!checks.some((c) => !c.ok && (c.name === 'generated-config' || c.name === 'trial-files'))) {
+            if (json)
+                printJson({ ok: true, checks, repaired: { removed: [], remaining: [], files: [] } });
+            else {
+                print(checks);
+                console.log('\nNothing to repair.');
+            }
+            return;
+        }
+        if (!await confirmLinkLoss('Regenerating the WiFi configuration may briefly disrupt the link. Continue?'))
+            return;
+        const repaired = await ad.repair(program.opts().interface);
+        checks = await ad.doctor(program.opts().interface);
+        if (json)
+            printJson({ ok: true, checks, repaired });
+        else {
+            print(checks);
+            const removed = repaired?.removed ?? [];
+            console.log(removed.length ? `\nRepaired: removed ${removed.map((s) => `"${s}"`).join(', ')} from the generated WiFi config.` : '\nRepair ran; no stale network needed removing.');
+            if (repaired?.files?.length)
+                console.log(`Removed ${repaired.files.length} unfinished trial file(s).`);
+            console.log('The running WiFi keeps its current association until the next reconnect or reboot.');
         }
     }
     catch (e) {
@@ -257,19 +362,37 @@ program.command('doctor')
     }
 });
 program.command('upgrade')
-    .description('Upgrade openwifi from the public GitHub repository')
-    .action(async () => {
+    .description('Install the newest tagged release from the public GitHub repository')
+    .option('--force', 'reinstall even when the installed version is the same or newer')
+    .action(async (opts) => {
     try {
         if (!program.opts().json)
-            console.log('Updating openwifi from GitHub…');
-        await upgradeFromGithub();
+            console.log('Checking GitHub releases…');
+        const result = await upgradeFromGithub({ force: !!opts.force });
         if (program.opts().json)
-            printJson({ ok: true, source: 'github:tanulmittal/wifi-cli' });
+            printJson({ ok: true, ...result });
+        else if (!result.updated)
+            console.log(`Already up to date: ${result.from}. Newest release is ${result.to}. Use --force to reinstall.`);
         else
-            console.log('Update complete. Run openwifi --version to check the installed version.');
+            console.log(`Updated ${result.from} to ${result.to}. Run openwifi --version to confirm.`);
     }
     catch (e) {
         handleErr(e, raw(['upgrade']));
+    }
+});
+// Hidden worker command: see src/trial.ts. It must run outside the SSH session that started the
+// trial, which is why `connect` re-executes the CLI instead of confirming the trial in-process.
+program.command('__trial', { hidden: true })
+    .requiredOption('--interface <name>')
+    .requiredOption('--ssid <ssid>')
+    .requiredOption('--candidate <path>')
+    .action(async (opts) => {
+    try {
+        process.exitCode = await runConnectTrial({ iface: opts.interface, ssid: opts.ssid, candidate: opts.candidate });
+    }
+    catch (error) {
+        await recordTrialFailure(opts.ssid, opts.interface, error);
+        process.exitCode = 1;
     }
 });
 // Bare `openwifi` -> guided menu (non-tech default)

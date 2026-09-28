@@ -2,6 +2,7 @@ import * as p from '@clack/prompts';
 import { adapter } from './adapters/index.js';
 import { isAuthError, sudoHint, which } from './util.js';
 import { backend, requireConnectBackend } from './adapters/linux.js';
+import { followTrial, TRIAL_FOLLOW_MS } from './trial.js';
 export async function confirmRemoteWifiSwitch() {
     if (await backend() !== 'wpa_cli')
         return true;
@@ -23,6 +24,7 @@ export async function guided(rawArgv) {
             { value: 'status', label: 'Show status' },
             ...(canDisconnect ? [{ value: 'disconnect', label: 'Disconnect' }] : []),
             { value: 'list', label: 'Saved networks' },
+            ...(canDisconnect ? [{ value: 'use', label: 'Switch to a saved network' }] : []),
             { value: 'forget', label: 'Forget / remove' },
             ...(canEdit ? [{ value: 'edit', label: 'Edit saved network' }] : []),
             { value: 'doctor', label: 'Troubleshoot' },
@@ -77,13 +79,45 @@ export async function guided(rawArgv) {
             const s2 = p.spinner();
             s2.start(`Connecting to ${ssid}…`);
             try {
-                await ad.connect(ssid, { password: pw || undefined });
-                s2.stop(`Connected to ${ssid}.`);
+                const outcome = await ad.connect(ssid, { password: pw || undefined });
+                if (outcome?.stateFile && !outcome?.alreadyConnected) {
+                    s2.message(`Trying ${ssid} for up to 90 seconds…`);
+                    const { state, timedOut } = await followTrial({ timeoutMs: TRIAL_FOLLOW_MS });
+                    if (timedOut)
+                        s2.stop(`Trial still running for ${ssid}; check with: openwifi status`);
+                    else if (state?.phase === 'ok')
+                        s2.stop(`Connected to ${ssid}.`);
+                    else
+                        throw new Error(state?.error ?? 'The trial rolled back; the previous connection is unchanged.');
+                }
+                else {
+                    s2.stop(`Connected to ${ssid}.`);
+                }
             }
             catch (e) {
                 s2.stop(`Could not connect to ${ssid}.`);
                 throw e;
             }
+        }
+        else if (action === 'use') {
+            const items = await ad.list();
+            if (!items.length) {
+                p.cancel('No saved networks.');
+                return;
+            }
+            const pick = await p.select({ message: 'Switch to which saved network?', options: items.map((s) => ({ value: s.name, label: s.name })) });
+            if (p.isCancel(pick)) {
+                p.cancel('Bye.');
+                return;
+            }
+            if (!await confirmRemoteWifiSwitch()) {
+                p.cancel('Kept the current connection.');
+                return;
+            }
+            const s3 = p.spinner();
+            s3.start(`Switching to ${pick}…`);
+            await ad.use(pick);
+            s3.stop(`Switched to ${pick}.`);
         }
         else if (action === 'status') {
             console.log(JSON.stringify(await ad.status(), null, 2));

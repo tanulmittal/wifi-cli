@@ -62,6 +62,22 @@ export const macos = {
         const { stdout } = await run('networksetup', ['-listpreferredwirelessnetworks', iface ?? defaultIface()]);
         return stdout.split('\n').map(l => l.trim()).filter(l => l && !/^Preferred/i.test(l)).map(name => ({ name }));
     },
+    // networksetup joins a preferred network with the password already in the Keychain, so this writes
+    // no profile: it is the macOS equivalent of switching back to something you saved earlier.
+    async use(ssid, iface) {
+        const i = iface ?? defaultIface();
+        await run('networksetup', ['-setairportnetwork', i, ssid], { timeoutMs: 30000 });
+        const st = await macos.status(i).catch(() => null);
+        if (!st)
+            return { ssid, verified: false };
+        if (st.network === 'Connected (network name hidden by macOS)')
+            return { ssid, verified: false };
+        if (!st.connected || !st.network.includes(ssid))
+            throw new Error(`macOS did not connect to "${ssid}" (now: ${st.network})`);
+        return { ssid, verified: true };
+    },
+    // Netplan trial artifacts do not exist on macOS, so there is never generated config to repair.
+    async repair() { return { removed: [], remaining: [], files: [] }; },
     async status(iface) {
         const i = iface ?? defaultIface();
         const [net, power] = await Promise.all([

@@ -2,11 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
-import { connectNetplan, editNetplan, forgetNetplan, isOpenwifiProfile, netplanCandidate, parseWpaNetworks, removeNewTrialCopies, requireNetplanForget, setNetplanDirForTests, setNetplanTempRootForTests, setTrialStarter, tryNetplanConnection } from '../src/adapters/netplan.js';
+import { connectNetplan, editNetplan, forgetNetplan, isOpenwifiProfile, netplanCandidate, parseConfSsids, parseWpaNetworks, removeNewTrialCopies, repairGeneratedConf, requireNetplanForget, runConnectTrial, setGeneratedConfDirForTests, setNetplanDirForTests, setNetplanTempRootForTests, setTrialStarter, tryNetplanConnection, ungeneratedSsids, useNetplan } from '../src/adapters/netplan.js';
+import { readTrialState, setTrialSpawnerForTests, setTrialStateDirForTests, trialLogFile, trialStateFile, writeTrialState } from '../src/trial.js';
 import { setRunner } from '../src/util.js';
 
 test('Netplan candidate contains one target AP and WPA credentials in system format', () => {
@@ -98,7 +99,7 @@ test('Netplan connect refuses an already configured UTF-8 SSID before starting a
     throw new Error('Unexpected command');
   });
   try {
-    await assert.rejects(connectNetplan('Tanul’s iPhone', { iface: 'wlp2s0', password: 'secret123' }), /already configured/);
+    await assert.rejects(connectNetplan('Tanul’s iPhone', { iface: 'wlp2s0', password: 'secret123' }), /already a saved network/);
     assert.deepEqual(calls.map(call => call.split(' ')[0]), ['netplan', 'wpa_cli', 'wpa_cli']);
   } finally { setRunner(null); setTrialStarter(null); (process as any).getuid = getuid; }
 });
@@ -220,4 +221,171 @@ test('active Netplan edit forces fresh authentication under trial before saving'
     assert.ok(calls.findIndex(call => call.includes('disconnect')) < calls.findIndex(call => call.includes('select_network')));
     assert.match(await readFile(source, 'utf8'), /newpass123/);
   } finally { setRunner(null); setTrialStarter(null); setNetplanDirForTests(null); setNetplanTempRootForTests(null); (process as any).getuid = getuid; await rm(dir, { recursive: true, force: true }); }
+});
+
+test('Netplan connect starts a detached trial worker and keeps the password out of its arguments', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openwifi-detach-test-'));
+  const getuid = process.getuid;
+  (process as any).getuid = () => 0;
+  setNetplanDirForTests(dir);
+  setNetplanTempRootForTests(dir);
+  setTrialStateDirForTests(join(dir, 'state'));
+  const spawned: string[][] = [];
+  setTrialSpawnerForTests((cmd, argv) => { spawned.push([cmd, ...argv]); return { pid: 4242, unref: () => {} }; });
+  setRunner(async (cmd, args) => {
+    if (cmd === 'netplan' && args[0] === 'get') return { stdout: 'wlp2s0:\n  access-points:\n    Airtel_tanu_0405: {}\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('status')) return { stdout: 'wpa_state=COMPLETED\nssid=Airtel_tanu_0405\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('list_networks')) return { stdout: 'network id / ssid / bssid / flags\n0\tAirtel_tanu_0405\tany\t[CURRENT]\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('scan_results')) return { stdout: 'bssid / frequency / signal level / flags / ssid\naa:bb:cc:dd:ee:ff\t2412\t-55\t[WPA2-PSK-CCMP][ESS]\tNew WiFi\n', stderr: '' };
+    throw new Error('Unexpected command: ' + cmd);
+  });
+  try {
+    const state = await connectNetplan('New WiFi', { iface: 'wlp2s0', password: 'p@ssw0rd123' });
+    assert.equal(state.phase, 'starting');
+    assert.equal(state.pid, 4242);
+    assert.equal(spawned.length, 1);
+    assert.ok(spawned[0].includes('__trial'), 'the worker runs the hidden trial command');
+    assert.ok(!spawned[0].join(' ').includes('p@ssw0rd123'), 'the password must never reach the worker arguments');
+    const candidate = spawned[0][spawned[0].indexOf('--candidate') + 1];
+    assert.ok(candidate.startsWith(join(dir, 'openwifi')));
+    assert.equal((await stat(candidate)).mode & 0o777, 0o600);
+    assert.match(await readFile(candidate, 'utf8'), /p@ssw0rd123/);
+    assert.equal((await readTrialState())?.ssid, 'New WiFi');
+  } finally {
+    setRunner(null); setTrialSpawnerForTests(null); setTrialStateDirForTests(null);
+    setNetplanDirForTests(null); setNetplanTempRootForTests(null); (process as any).getuid = getuid;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the detached worker saves the profile on success and always deletes the candidate', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openwifi-worker-test-'));
+  const getuid = process.getuid;
+  (process as any).getuid = () => 0;
+  const ssid = 'New WiFi';
+  const filename = '90-openwifi-wlp2s0-' + createHash('sha256').update(ssid).digest('hex').slice(0, 12) + '.yaml';
+  const candidate = join(dir, 'openwifi', filename);
+  await mkdir(join(dir, 'openwifi'), { recursive: true });
+  await writeFile(candidate, netplanCandidate('wlp2s0', ssid, 'secret123'), { mode: 0o600 });
+  setNetplanDirForTests(dir);
+  setNetplanTempRootForTests(dir);
+  setTrialStateDirForTests(join(dir, 'state'));
+  await writeTrialState({ phase: 'starting', ssid, iface: 'wlp2s0', pid: 1, startedAt: new Date().toISOString(), stateFile: trialStateFile(), logFile: trialLogFile() });
+  const trial = new EventEmitter() as ChildProcess;
+  (trial as any).kill = (signal: string) => { queueMicrotask(() => trial.emit('exit', signal === 'SIGUSR1' ? 0 : 1)); return true; };
+  setTrialStarter(() => trial);
+  setRunner(async (cmd, args) => {
+    if (cmd === 'wpa_cli' && args.includes('list_networks')) return { stdout: 'network id / ssid / bssid / flags\n0\tCurrent\tany\t[CURRENT]\n1\tNew WiFi\tany\t\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('select_network')) return { stdout: 'OK\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('status')) return { stdout: 'wpa_state=COMPLETED\nssid=New WiFi\n', stderr: '' };
+    if (cmd === 'ip') return { stdout: '3: wlp2s0 inet 10.0.0.9/24\n', stderr: '' };
+    throw new Error('Unexpected command: ' + cmd);
+  });
+  try {
+    assert.equal(await runConnectTrial({ iface: 'wlp2s0', ssid, candidate }), 0);
+    const state = await readTrialState();
+    assert.equal(state?.phase, 'ok');
+    assert.equal(state?.saved, true);
+    await assert.rejects(access(candidate), { code: 'ENOENT' });
+    assert.match(await readFile(join(dir, filename), 'utf8'), /secret123/);
+  } finally {
+    setRunner(null); setTrialStarter(null); setTrialStateDirForTests(null);
+    setNetplanDirForTests(null); setNetplanTempRootForTests(null); (process as any).getuid = getuid;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the detached worker records a rollback and saves nothing when the trial cannot select the network', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openwifi-worker-fail-test-'));
+  const getuid = process.getuid;
+  (process as any).getuid = () => 0;
+  const ssid = 'Blocked WiFi';
+  const filename = '90-openwifi-wlp2s0-' + createHash('sha256').update(ssid).digest('hex').slice(0, 12) + '.yaml';
+  const candidate = join(dir, 'openwifi', filename);
+  await mkdir(join(dir, 'openwifi'), { recursive: true });
+  await writeFile(candidate, netplanCandidate('wlp2s0', ssid, 'secret123'), { mode: 0o600 });
+  setNetplanDirForTests(dir);
+  setNetplanTempRootForTests(dir);
+  setTrialStateDirForTests(join(dir, 'state'));
+  await writeTrialState({ phase: 'starting', ssid, iface: 'wlp2s0', pid: 1, startedAt: new Date().toISOString(), stateFile: trialStateFile(), logFile: trialLogFile() });
+  const trial = new EventEmitter() as ChildProcess;
+  (trial as any).kill = () => { queueMicrotask(() => trial.emit('exit', 1)); return true; };
+  setTrialStarter(() => trial);
+  setRunner(async (cmd, args) => {
+    if (cmd === 'wpa_cli' && args.includes('list_networks')) return { stdout: 'network id / ssid / bssid / flags\n0\tCurrent\tany\t[CURRENT]\n1\tBlocked WiFi\tany\t\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('select_network')) return { stdout: 'FAIL\n', stderr: '' };
+    throw new Error('Unexpected command: ' + cmd);
+  });
+  try {
+    assert.equal(await runConnectTrial({ iface: 'wlp2s0', ssid, candidate }), 1);
+    const state = await readTrialState();
+    assert.equal(state?.phase, 'rolled-back');
+    assert.equal(state?.saved, false);
+    assert.match(state?.error ?? '', /Could not select/);
+    await assert.rejects(access(candidate), { code: 'ENOENT' });
+    await assert.rejects(access(join(dir, filename)), { code: 'ENOENT' });
+  } finally {
+    setRunner(null); setTrialStarter(null); setTrialStateDirForTests(null);
+    setNetplanDirForTests(null); setNetplanTempRootForTests(null); (process as any).getuid = getuid;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('use selects an existing runtime network without writing configuration', async () => {
+  const getuid = process.getuid;
+  (process as any).getuid = () => 0;
+  const selected: string[] = [];
+  let active = 'Airtel_tanu_0405';
+  setRunner(async (cmd, args) => {
+    if (cmd === 'wpa_cli' && args.includes('list_networks')) return { stdout: 'network id / ssid / bssid / flags\n0\tAirtel_tanu_0405\tany\t[CURRENT]\n1\tTanul\\xe2\\x80\\x99s iPhone\tany\t\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('status')) return { stdout: 'wpa_state=COMPLETED\nssid=' + (active === 'Airtel_tanu_0405' ? active : 'Tanul\\xe2\\x80\\x99s iPhone') + '\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('select_network')) { selected.push(args[args.length - 1]); active = 'Tanul\u2019s iPhone'; return { stdout: 'OK\n', stderr: '' }; }
+    if (cmd === 'ip') return { stdout: '3: wlp2s0 inet 172.20.10.4/28\n', stderr: '' };
+    throw new Error('Unexpected command: ' + cmd);
+  });
+  try {
+    assert.deepEqual(await useNetplan('Airtel_tanu_0405', 'wlp2s0'), { ssid: 'Airtel_tanu_0405', id: '0' });
+    assert.deepEqual(selected, [], 'an already-connected network needs no selection');
+    assert.deepEqual(await useNetplan('Tanul\u2019s iPhone', 'wlp2s0'), { ssid: 'Tanul\u2019s iPhone', id: '1' });
+    assert.deepEqual(selected, ['1']);
+    await assert.rejects(useNetplan('Unknown Net', 'wlp2s0'), /not a saved network/);
+  } finally { setRunner(null); (process as any).getuid = getuid; }
+});
+
+test('generated Netplan conf parsing reads netplan quoting and escaped SSID bytes', () => {
+  const conf = 'ctrl_interface=/run/wpa_supplicant\n\nnetwork={\n  ssid=P"Airtel_tanu_0405"\n}\nnetwork={\n  ssid="Plain Net"\n}\nnetwork={\n  ssid=P"Tanul\\xe2\\x80\\x99s iPhone"\n}\n';
+  assert.deepEqual(parseConfSsids(conf), ['Airtel_tanu_0405', 'Plain Net', 'Tanul\u2019s iPhone']);
+});
+
+test('doctor detects a generated conf left behind by an unfinished trial and --fix regenerates it', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openwifi-generated-test-'));
+  const getuid = process.getuid;
+  (process as any).getuid = () => 0;
+  setNetplanDirForTests(dir);
+  setGeneratedConfDirForTests(dir);
+  setNetplanTempRootForTests(dir);
+  const generated = join(dir, 'wpa-wlp2s0.conf');
+  await writeFile(generated, 'network={\n  ssid=P"Airtel_tanu_0405"\n}\nnetwork={\n  ssid=P"Tanul\\xe2\\x80\\x99s iPhone"\n}\n', { mode: 0o600 });
+  let regenerated = false;
+  setRunner(async (cmd, args) => {
+    if (cmd === 'netplan' && args[0] === 'get') return { stdout: 'Airtel_tanu_0405:\n  auth:\n    key-management: psk\n    password: not-a-real-secret\n', stderr: '' };
+    if (cmd === 'netplan' && args[0] === 'generate') {
+      regenerated = true;
+      await writeFile(generated, 'network={\n  ssid=P"Airtel_tanu_0405"\n}\n', { mode: 0o600 });
+      return { stdout: '', stderr: '' };
+    }
+    throw new Error('Unexpected command: ' + cmd);
+  });
+  try {
+    assert.deepEqual(await ungeneratedSsids('wlp2s0'), ['Tanul\u2019s iPhone']);
+    const result = await repairGeneratedConf('wlp2s0');
+    assert.equal(regenerated, true);
+    assert.deepEqual(result.removed, ['Tanul\u2019s iPhone']);
+    assert.deepEqual(result.remaining, []);
+    assert.deepEqual(await ungeneratedSsids('wlp2s0'), []);
+  } finally {
+    setRunner(null); setGeneratedConfDirForTests(null); setNetplanDirForTests(null);
+    setNetplanTempRootForTests(null); (process as any).getuid = getuid;
+    await rm(dir, { recursive: true, force: true });
+  }
 });

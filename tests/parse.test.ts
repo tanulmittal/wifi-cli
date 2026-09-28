@@ -196,3 +196,33 @@ test('wpa_cli disconnect and rfkill radio control verify system replies', async 
     assert.ok(calls.includes('rfkill unblock 0'));
   } finally { setRunner(null); (process as any).getuid = getuid; }
 });
+
+test('use switches to a saved network on macOS and verifies the result', async () => {
+  const calls: string[] = [];
+  setRunner(async (cmd, args) => {
+    calls.push(cmd + ' ' + args.join(' '));
+    if (cmd === 'networksetup' && args[0] === '-setairportnetwork') return { stdout: '', stderr: '' };
+    if (cmd === 'networksetup' && args[0] === '-getairportnetwork') return { stdout: 'Current Wi-Fi Network: My Home\n', stderr: '' };
+    if (cmd === 'networksetup' && args[0] === '-getairportpower') return { stdout: 'Wi-Fi Power (en0): On\n', stderr: '' };
+    throw new Error('Unexpected command: ' + cmd);
+  });
+  try {
+    assert.deepEqual(await macos.use('My Home', 'en0'), { ssid: 'My Home', verified: true });
+    assert.equal(calls[0], 'networksetup -setairportnetwork en0 My Home');
+    assert.deepEqual(await macos.repair(), { removed: [], remaining: [], files: [] });
+  } finally { setRunner(null); }
+});
+
+test('linux use activates a saved NetworkManager profile', async () => {
+  const calls: string[] = [];
+  setRunner(async (cmd, args) => {
+    calls.push(cmd + ' ' + args.join(' '));
+    if (cmd === 'which') { if (args[0] === 'nmcli') return { stdout: '/usr/bin/nmcli', stderr: '' }; throw new Error('missing'); }
+    if (cmd === 'nmcli' && args[0] === 'connection' && args[1] === 'up') return { stdout: 'Connection successfully activated\n', stderr: '' };
+    throw new Error('Unexpected command: ' + cmd);
+  });
+  try {
+    assert.deepEqual(await linux.use('My Home'), { ssid: 'My Home' });
+    assert.ok(calls.includes('nmcli connection up id My Home'));
+  } finally { setRunner(null); }
+});

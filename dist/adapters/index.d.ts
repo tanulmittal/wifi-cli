@@ -7,7 +7,21 @@ export declare function adapter(): {
         iface?: string;
         timeoutMs?: number;
         save?: boolean;
-    }): Promise<void | import("../util.js").RunResult>;
+    }): Promise<import("../util.js").RunResult | import("../trial.js").TrialState>;
+    use(ssid: string, iface?: string): Promise<{
+        ssid: string;
+        id: string;
+    } | {
+        ssid: string;
+    }>;
+    repair(iface?: string): Promise<{
+        removed: string[];
+        remaining: string[];
+        files: string[];
+    } | {
+        removed: string[];
+        remaining: string[];
+    }>;
     list(iface?: string): Promise<import("./linux.js").Profile[]>;
     status(iface?: string): Promise<{
         backend: "iwctl";
@@ -65,6 +79,15 @@ export declare function adapter(): {
     list(iface?: string): Promise<{
         name: string;
     }[]>;
+    use(ssid: string, iface?: string): Promise<{
+        ssid: string;
+        verified: boolean;
+    }>;
+    repair(): Promise<{
+        removed: string[];
+        remaining: string[];
+        files: string[];
+    }>;
     status(iface?: string): Promise<{
         interface: string;
         network: string;

@@ -14,6 +14,15 @@ export declare const macos: {
     list(iface?: string): Promise<{
         name: string;
     }[]>;
+    use(ssid: string, iface?: string): Promise<{
+        ssid: string;
+        verified: boolean;
+    }>;
+    repair(): Promise<{
+        removed: string[];
+        remaining: string[];
+        files: string[];
+    }>;
     status(iface?: string): Promise<{
         interface: string;
         network: string;

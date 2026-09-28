@@ -2,20 +2,23 @@ import { spawn } from 'node:child_process';
 import { createHash, pbkdf2Sync } from 'node:crypto';
 import { access, chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { join } from 'node:path';
-import { isMap, isScalar, parseDocument } from 'yaml';
+import { basename, join } from 'node:path';
+import { isMap, isScalar, parse, parseDocument } from 'yaml';
 import { setTimeout as delay } from 'node:timers/promises';
 import { run, failClosed } from '../util.js';
+import { appendTrialLog, readTrialState, startDetachedTrial, trialLogFile, trialStateFile, writeTrialState } from '../trial.js';
 import { decodeWpaSsid, validWpaSsid } from './wpa.js';
 let startTrial = (args) => spawn('netplan', args, { stdio: ['pipe', 'ignore', 'ignore'] });
 let netplanDir = '/etc/netplan';
 let tempRoot = '/run';
+let generatedDir = '/run/netplan';
 // Test hook: network-changing trials are never run in the test process.
 export function setTrialStarter(start) {
     startTrial = start ?? ((args) => spawn('netplan', args, { stdio: ['pipe', 'ignore', 'ignore'] }));
 }
 export function setNetplanDirForTests(dir) { netplanDir = dir ?? '/etc/netplan'; }
 export function setNetplanTempRootForTests(dir) { tempRoot = dir ?? '/run'; }
+export function setGeneratedConfDirForTests(dir) { generatedDir = dir ?? '/run/netplan'; }
 export function netplanCandidate(iface, ssid, password, hidden = false) {
     const profile = password ? { password, ...(hidden ? { hidden: true } : {}) } : hidden ? { hidden: true } : {};
     return JSON.stringify({ network: { version: 2, wifis: { [iface]: { 'access-points': { [ssid]: profile } } } } }, null, 2) + '\n';
@@ -58,26 +61,7 @@ export async function tryNetplanConnection(candidate, iface, ssid, forceReconnec
             throw new Error('Could not force a fresh WiFi authentication; the trial will be rolled back.');
         if (!(await wpa(iface, 'select_network', networkId)).endsWith('OK'))
             throw new Error(`Could not select "${ssid}". The trial will be rolled back.`);
-        let connected = false;
-        let verifiedTwice = false;
-        for (let attempt = 0; attempt < 45 && !ended; attempt++) {
-            await delay(1000);
-            const status = await wpa(iface, 'status').catch(() => '');
-            if (status.includes('wpa_state=COMPLETED') && status.split('\n').some(line => line.startsWith('ssid=') && decodeWpaSsid(line.slice(5)) === ssid)) {
-                const address = await run('ip', ['-4', '-o', 'addr', 'show', 'dev', iface]).then(r => r.stdout).catch(() => '');
-                if (/\binet\s+\d/.test(address)) {
-                    if (verifiedTwice) {
-                        connected = true;
-                        break;
-                    }
-                    verifiedTwice = true;
-                    continue;
-                }
-            }
-            verifiedTwice = false;
-        }
-        if (!connected)
-            throw new Error(`Could not confirm "${ssid}" with an IP address. The trial will be rolled back.`);
+        await waitForAssociation(iface, ssid, () => !ended, `Could not confirm "${ssid}" with an IP address. The trial will be rolled back.`);
         if (!trial.kill('SIGUSR1'))
             throw new Error('Netplan trial exited before confirmation; nothing was saved.');
         const result = await exited;
@@ -92,7 +76,27 @@ export async function tryNetplanConnection(candidate, iface, ssid, forceReconnec
         throw e;
     }
 }
-async function wifiInterface(requested) {
+// An association counts only once it is stable and the interface holds an IPv4 address: a half-open
+// link would otherwise be reported as success and the trial confirmed too early.
+async function waitForAssociation(iface, ssid, keepGoing, failure) {
+    let verifiedTwice = false;
+    for (let attempt = 0; attempt < 45 && keepGoing(); attempt++) {
+        await delay(1000);
+        const status = await wpa(iface, 'status').catch(() => '');
+        if (status.includes('wpa_state=COMPLETED') && status.split('\n').some(line => line.startsWith('ssid=') && decodeWpaSsid(line.slice(5)) === ssid)) {
+            const address = await run('ip', ['-4', '-o', 'addr', 'show', 'dev', iface]).then(r => r.stdout).catch(() => '');
+            if (/\binet\s+\d/.test(address)) {
+                if (verifiedTwice)
+                    return;
+                verifiedTwice = true;
+                continue;
+            }
+        }
+        verifiedTwice = false;
+    }
+    throw new Error(failure);
+}
+export async function wifiInterface(requested) {
     if (requested) {
         if (!/^[a-zA-Z0-9_-]+$/.test(requested))
             failClosed('Invalid WiFi interface name');
@@ -207,11 +211,12 @@ export async function connectNetplan(ssid, options = {}) {
     const current = await wpa(iface, 'status');
     if (!current.includes('wpa_state=COMPLETED'))
         failClosed('Current WiFi is not connected; use the system console to repair it first');
-    if (current.split('\n').some(line => line.startsWith('ssid=') && decodeWpaSsid(line.slice(5)) === ssid))
-        return;
+    if (current.split('\n').some(line => line.startsWith('ssid=') && decodeWpaSsid(line.slice(5)) === ssid)) {
+        return { phase: 'ok', ssid, iface, pid: 0, startedAt: new Date().toISOString(), saved: false, alreadyConnected: true, stateFile: trialStateFile(), logFile: trialLogFile() };
+    }
     const existing = parseWpaNetworks(await wpa(iface, 'list_networks'));
     if (existing.some(network => network.ssid === ssid)) {
-        failClosed(`"${ssid}" is already configured in wpa_supplicant. openwifi cannot safely reselect a stored Netplan network during a trial; no profile was added`);
+        failClosed(`"${ssid}" is already a saved network. Switch to it with: openwifi use "${ssid}" (no profile was added)`);
     }
     const scans = await wpa(iface, 'scan_results').catch(() => '');
     const match = scans.split('\n').slice(1).map(line => line.split('\t')).find(fields => decodeWpaSsid(fields.slice(4).join('\t')) === ssid);
@@ -230,28 +235,150 @@ export async function connectNetplan(ssid, options = {}) {
         if (e.code !== 'ENOENT')
             throw e;
     }
-    const candidateContent = netplanCandidate(iface, ssid, options.password, options.hidden);
-    const previous = new Set(await trialCopies(saved));
-    const tempDir = await mkdtemp('/run/openwifi-');
-    const candidate = `${tempDir}/${filename}`;
+    const candidate = candidatePath(filename);
+    await mkdir(candidateDir(), { recursive: true, mode: 0o755 });
+    // A killed run can leave a candidate holding the WPA password; replace it before writing a new one.
+    await rm(candidate, { force: true });
+    await writeFile(candidate, netplanCandidate(iface, ssid, options.password, options.hidden), { mode: 0o600, flag: 'wx' });
     try {
-        await writeFile(candidate, candidateContent, { mode: 0o600, flag: 'wx' });
-        await tryNetplanConnection(candidate, iface, ssid);
+        return await startDetachedTrial({ iface, ssid, candidate });
+    }
+    catch (error) {
+        await rm(candidate, { force: true }).catch(() => { });
+        throw error;
+    }
+}
+function candidateDir() { return join(tempRoot, 'openwifi'); }
+function candidatePath(filename) { return join(candidateDir(), filename); }
+// Runs inside the detached worker (`openwifi __trial`). The worker owns the whole trial: apply it,
+// confirm it, save the profile on success, roll back otherwise, and always delete the candidate
+// because that file holds the WPA password.
+export async function runConnectTrial(o) {
+    const base = (await readTrialState()) ?? {
+        phase: 'starting', ssid: o.ssid, iface: o.iface, pid: process.pid, startedAt: new Date().toISOString(),
+        stateFile: trialStateFile(), logFile: trialLogFile(),
+    };
+    const write = (patch) => writeTrialState({ ...base, ...patch, pid: process.pid });
+    await appendTrialLog(`trial start iface=${o.iface} ssid=${JSON.stringify(o.ssid)}`);
+    try {
+        await write({ phase: 'trying' });
+        const saved = join(netplanDir, basename(o.candidate));
+        const previous = new Set(await trialCopies(saved));
+        let content = '';
         try {
-            await copyFile(candidate, saved, constants.COPYFILE_EXCL);
+            content = await readFile(o.candidate, 'utf8');
+        }
+        catch { /* candidate already gone */ }
+        try {
+            await tryNetplanConnection(o.candidate, o.iface, o.ssid);
+            try {
+                await copyFile(o.candidate, saved, constants.COPYFILE_EXCL);
+            }
+            catch (error) {
+                throw new Error(`Connected to "${o.ssid}" but could not save it for reboot: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            if (content)
+                await removeNewTrialCopies(saved, content, previous);
+            await write({ phase: 'ok', saved: true, finishedAt: new Date().toISOString() });
+            await appendTrialLog('trial ok');
+            return 0;
         }
         catch (error) {
-            throw new Error(`Connected to "${ssid}" but could not save it for reboot: ${error instanceof Error ? error.message : String(error)}`);
+            const message = error instanceof Error ? error.message : String(error);
+            if (content)
+                await removeNewTrialCopies(saved, content, previous).catch(() => { });
+            await write({ phase: 'rolled-back', saved: false, error: message, finishedAt: new Date().toISOString() });
+            await appendTrialLog(`trial rolled back: ${message}`);
+            return 1;
         }
     }
     finally {
-        try {
-            await removeNewTrialCopies(saved, candidateContent, previous);
-        }
-        finally {
-            await rm(tempDir, { recursive: true, force: true });
-        }
+        await rm(o.candidate, { force: true }).catch(() => { });
     }
+}
+// Switching back to a saved network writes no configuration, so it needs no trial and cannot strand a
+// host that just moved to a new network: it only asks wpa_supplicant to select an existing entry.
+export async function useNetplan(ssid, requestedIface) {
+    if (process.getuid?.() !== 0)
+        throw new Error('Switching a saved Netplan network requires root privileges');
+    const iface = await wifiInterface(requestedIface);
+    const match = parseWpaNetworks(await wpa(iface, 'list_networks')).find(network => network.ssid === ssid);
+    if (!match)
+        failClosed(`"${ssid}" is not a saved network on ${iface}. See: openwifi list`);
+    const status = await wpa(iface, 'status');
+    const current = status.split('\n').find(line => line.startsWith('ssid='));
+    if (status.includes('wpa_state=COMPLETED') && current && decodeWpaSsid(current.slice(5)) === ssid)
+        return { ssid, id: match.id };
+    if (!(await wpa(iface, 'select_network', match.id)).endsWith('OK'))
+        throw new Error(`wpa_supplicant could not select "${ssid}"`);
+    await waitForAssociation(iface, ssid, () => true, `Could not confirm "${ssid}" with an IP address. If this host is remote, use its physical console.`);
+    return { ssid, id: match.id };
+}
+// netplan writes /run/netplan/wpa-<iface>.conf from the saved YAML. A trial that is killed instead of
+// confirmed leaves the trial network in that generated file, so compare the two and name the extras.
+export function parseConfSsids(conf) {
+    const ssids = [];
+    for (const line of conf.split('\n')) {
+        const value = line.match(/^\s*ssid=(.*)$/)?.[1]?.trim();
+        if (!value)
+            continue;
+        const unquoted = value.startsWith('P"') && value.endsWith('"') ? value.slice(2, -1) : value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value;
+        const ssid = decodeWpaSsid(unquoted);
+        if (validWpaSsid(ssid))
+            ssids.push(ssid);
+    }
+    return ssids;
+}
+export function generatedConfPath(iface) { return join(generatedDir, `wpa-${iface}.conf`); }
+export async function ungeneratedSsids(iface) {
+    let conf;
+    try {
+        conf = await readFile(generatedConfPath(iface), 'utf8');
+    }
+    catch {
+        return [];
+    }
+    const generated = parseConfSsids(conf);
+    if (!generated.length)
+        return [];
+    // `netplan get` prints the WPA password, so its output is only ever parsed here and never surfaced.
+    const { stdout } = await run('netplan', ['get', `wifis.${iface}.access-points`]);
+    const configured = Object.keys(parse(stdout) ?? {});
+    return generated.filter(ssid => !configured.includes(ssid));
+}
+export async function repairGeneratedConf(iface) {
+    if (process.getuid?.() !== 0)
+        throw new Error('Repairing the generated WiFi configuration requires root privileges');
+    const before = await ungeneratedSsids(iface);
+    if (before.length)
+        await run('netplan', ['generate']);
+    const remaining = await ungeneratedSsids(iface);
+    // Leftover candidates hold the WPA password in plaintext, so repair removes them too.
+    const files = await leftoverCandidates();
+    for (const name of files)
+        await rm(join(candidateDir(), name), { force: true }).catch(() => { });
+    return { removed: before.filter(ssid => !remaining.includes(ssid)), remaining, files };
+}
+export async function leftoverCandidates() {
+    try {
+        return (await readdir(candidateDir())).filter(name => name.endsWith('.yaml'));
+    }
+    catch {
+        return [];
+    }
+}
+// A worker that dies before finishing must still leave an explanation behind, otherwise `openwifi
+// status` would keep reporting the last phase forever.
+export async function recordTrialFailure(ssid, iface, error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const previous = await readTrialState();
+    await appendTrialLog(`worker failed: ${message}`);
+    await writeTrialState({
+        phase: 'rolled-back', ssid, iface, pid: process.pid,
+        startedAt: previous?.startedAt ?? new Date().toISOString(), finishedAt: new Date().toISOString(),
+        saved: false, error: message,
+        stateFile: previous?.stateFile ?? trialStateFile(), logFile: previous?.logFile ?? trialLogFile(),
+    }).catch(() => { });
 }
 async function prepareEditedYaml(dir, iface, ssid, changes) {
     const matches = [];
