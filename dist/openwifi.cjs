@@ -11527,7 +11527,7 @@ async function runConnectTrial(o) {
     stateFile: trialStateFile(),
     logFile: trialLogFile()
   };
-  const write = (patch) => writeTrialState({ ...base, ...patch, pid: process.pid });
+  const write = (patch) => writeTrialState({ ...base, ...patch, pid: process.pid, ssid: o.ssid, iface: o.iface });
   await appendTrialLog(`trial start iface=${o.iface} ssid=${JSON.stringify(o.ssid)}`);
   try {
     await write({ phase: "trying" });

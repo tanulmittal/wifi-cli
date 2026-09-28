@@ -226,7 +226,9 @@ export async function runConnectTrial(o: { iface: string; ssid: string; candidat
     phase: 'starting', ssid: o.ssid, iface: o.iface, pid: process.pid, startedAt: new Date().toISOString(),
     stateFile: trialStateFile(), logFile: trialLogFile(),
   };
-  const write = (patch: Partial<TrialState>) => writeTrialState({ ...base, ...patch, pid: process.pid });
+  // Always name the network this worker is actually trying: the state read above may belong to an
+  // earlier attempt, and `status` must never report the wrong SSID.
+  const write = (patch: Partial<TrialState>) => writeTrialState({ ...base, ...patch, pid: process.pid, ssid: o.ssid, iface: o.iface });
   await appendTrialLog(`trial start iface=${o.iface} ssid=${JSON.stringify(o.ssid)}`);
   try {
     await write({ phase: 'trying' });
