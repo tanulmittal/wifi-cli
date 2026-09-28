@@ -11554,6 +11554,8 @@ async function runConnectTrial(o) {
       if (content) await removeNewTrialCopies(saved, content, previous).catch(() => {
       });
       const repaired = await repairGeneratedConf(o.iface).catch(() => null);
+      await dropRuntimeNetwork(o.iface, o.ssid).catch(() => {
+      });
       await write({ phase: "rolled-back", saved: false, error: message, finishedAt: (/* @__PURE__ */ new Date()).toISOString() });
       await appendTrialLog(`trial rolled back: ${message}${repaired?.removed.length ? `; refreshed generated config, removed ${repaired.removed.join(", ")}` : ""}`);
       return 1;
@@ -11617,6 +11619,16 @@ async function leftoverCandidates() {
     return (await (0, import_promises3.readdir)(candidateDir())).filter((name) => name.endsWith(".yaml"));
   } catch {
     return [];
+  }
+}
+async function dropRuntimeNetwork(iface, ssid) {
+  const listed = await wpa(iface, "list_networks").catch(() => "");
+  for (const line of listed.split("\n")) {
+    const [id, rawSsid, , flags] = line.split("	");
+    if (/^\d+$/.test(id ?? "") && decodeWpaSsid(rawSsid ?? "") === ssid && !flags?.includes("[CURRENT]")) {
+      await wpa(iface, "remove_network", id).catch(() => {
+      });
+    }
   }
 }
 async function recordTrialFailure(ssid, iface, error) {

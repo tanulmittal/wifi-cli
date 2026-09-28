@@ -316,8 +316,10 @@ test('the detached worker records a rollback and saves nothing when the trial ca
   await writeTrialState({ phase: 'starting', ssid, iface: 'wlp2s0', pid: 1, startedAt: new Date().toISOString(), stateFile: trialStateFile(), logFile: trialLogFile() });
   const trial = new EventEmitter() as ChildProcess;
   (trial as any).kill = () => { queueMicrotask(() => trial.emit('exit', 1)); return true; };
+  const removed: string[] = [];
   setTrialStarter(() => trial);
   setRunner(async (cmd, args) => {
+    if (cmd === 'wpa_cli' && args.includes('remove_network')) { removed.push(args[args.length - 1]); return { stdout: 'OK\n', stderr: '' }; }
     if (cmd === 'wpa_cli' && args.includes('list_networks')) return { stdout: 'network id / ssid / bssid / flags\n0\tCurrent\tany\t[CURRENT]\n1\tBlocked WiFi\tany\t\n', stderr: '' };
     if (cmd === 'wpa_cli' && args.includes('select_network')) return { stdout: 'FAIL\n', stderr: '' };
     throw new Error('Unexpected command: ' + cmd);
@@ -330,6 +332,7 @@ test('the detached worker records a rollback and saves nothing when the trial ca
     assert.match(state?.error ?? '', /Could not select/);
     await assert.rejects(access(candidate), { code: 'ENOENT' });
     await assert.rejects(access(join(dir, filename)), { code: 'ENOENT' });
+    assert.deepEqual(removed, ['1'], 'the rolled-back trial must drop its runtime network entry');
   } finally {
     setRunner(null); setTrialStarter(null); setTrialStateDirForTests(null);
     setNetplanDirForTests(null); setNetplanTempRootForTests(null); (process as any).getuid = getuid;
@@ -358,6 +361,7 @@ test('a rolled-back trial rebuilds the generated WiFi config instead of leaving 
   setTrialStarter(() => trial);
   let regenerated = false;
   setRunner(async (cmd, args) => {
+    if (cmd === 'wpa_cli' && args.includes('remove_network')) return { stdout: 'OK\n', stderr: '' };
     if (cmd === 'wpa_cli' && args.includes('list_networks')) return { stdout: 'network id / ssid / bssid / flags\n1\tBlocked WiFi\tany\t\n', stderr: '' };
     if (cmd === 'wpa_cli' && args.includes('select_network')) return { stdout: 'FAIL\n', stderr: '' };
     if (cmd === 'netplan' && args[0] === 'get') return { stdout: 'Airtel_tanu_0405:\n  auth:\n    key-management: psk\n', stderr: '' };

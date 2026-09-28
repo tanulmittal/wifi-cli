@@ -292,6 +292,7 @@ export async function runConnectTrial(o) {
             // A rolled-back Netplan try restores /etc/netplan but can leave the trial network in the
             // generated /run/netplan conf, so rebuild it here instead of asking the user to run doctor.
             const repaired = await repairGeneratedConf(o.iface).catch(() => null);
+            await dropRuntimeNetwork(o.iface, o.ssid).catch(() => { });
             await write({ phase: 'rolled-back', saved: false, error: message, finishedAt: new Date().toISOString() });
             await appendTrialLog(`trial rolled back: ${message}${repaired?.removed.length ? `; refreshed generated config, removed ${repaired.removed.join(', ')}` : ''}`);
             return 1;
@@ -370,6 +371,17 @@ export async function leftoverCandidates() {
     }
     catch {
         return [];
+    }
+}
+// A rolled-back trial can also leave its network in the running wpa_supplicant, where it would
+// linger until the next restart and make a retry of the same SSID look like a saved network.
+export async function dropRuntimeNetwork(iface, ssid) {
+    const listed = await wpa(iface, 'list_networks').catch(() => '');
+    for (const line of listed.split('\n')) {
+        const [id, rawSsid, , flags] = line.split('\t');
+        if (/^\d+$/.test(id ?? '') && decodeWpaSsid(rawSsid ?? '') === ssid && !flags?.includes('[CURRENT]')) {
+            await wpa(iface, 'remove_network', id).catch(() => { });
+        }
     }
 }
 // A worker that dies before finishing must still leave an explanation behind, otherwise `openwifi

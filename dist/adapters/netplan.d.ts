@@ -40,6 +40,7 @@ export declare function repairGeneratedConf(iface: string): Promise<{
     files: string[];
 }>;
 export declare function leftoverCandidates(): Promise<string[]>;
+export declare function dropRuntimeNetwork(iface: string, ssid: string): Promise<void>;
 export declare function recordTrialFailure(ssid: string, iface: string, error: unknown): Promise<void>;
 export declare function editNetplan(ssid: string, changes: {
     newPassword?: string;
