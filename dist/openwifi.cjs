@@ -11181,18 +11181,20 @@ var import_promises5 = require("node:timers/promises");
 var import_node_child_process3 = require("node:child_process");
 var import_node_crypto = require("node:crypto");
 var import_promises3 = require("node:fs/promises");
-var import_node_fs = require("node:fs");
+var import_node_fs2 = require("node:fs");
 var import_node_path2 = require("node:path");
 var import_yaml = __toESM(require_dist(), 1);
 var import_promises4 = require("node:timers/promises");
 
 // src/trial.ts
 var import_node_child_process2 = require("node:child_process");
+var import_node_fs = require("node:fs");
 var import_promises = require("node:fs/promises");
 var import_node_path = require("node:path");
 var import_promises2 = require("node:timers/promises");
 var TRIAL_FOLLOW_MS = 15e4;
 var stateDir = "/run/openwifi";
+var writeSeq = 0;
 function trialStateDir() {
   return stateDir;
 }
@@ -11215,7 +11217,7 @@ async function readTrialState() {
 }
 async function writeTrialState(state) {
   await (0, import_promises.mkdir)(stateDir, { recursive: true, mode: 493 });
-  const temp = `${trialStateFile()}.${process.pid}.tmp`;
+  const temp = `${trialStateFile()}.${process.pid}.${++writeSeq}.tmp`;
   await (0, import_promises.writeFile)(temp, `${JSON.stringify(state, null, 2)}
 `, { mode: 420 });
   await (0, import_promises.rename)(temp, trialStateFile());
@@ -11233,15 +11235,15 @@ function entryScript() {
 }
 function workerArgv(entry, o) {
   const loader = entry.endsWith(".ts") ? ["--import", "tsx"] : [];
-  return [...loader, entry, "__trial", "--interface", o.iface, "--ssid", o.ssid, "--candidate", o.candidate];
+  return [...loader, entry, "__trial", "--iface", o.iface, "--ssid", o.ssid, "--candidate", o.candidate];
 }
-function defaultSpawner(cmd, argv) {
-  const child = (0, import_node_child_process2.spawn)(cmd, argv, { detached: true, stdio: "ignore", cwd: "/" });
+function defaultSpawner(cmd, argv, logFd) {
+  const child = (0, import_node_child_process2.spawn)(cmd, argv, { detached: true, stdio: ["ignore", logFd, logFd], cwd: "/" });
   child.unref();
   return child;
 }
 var spawnDetached = defaultSpawner;
-async function startDetachedTrial(o) {
+async function startDetachedTrial(o, opts = {}) {
   const state = {
     phase: "starting",
     ssid: o.ssid,
@@ -11252,10 +11254,27 @@ async function startDetachedTrial(o) {
     logFile: trialLogFile()
   };
   await writeTrialState(state);
-  const child = spawnDetached(process.execPath, workerArgv(entryScript(), o));
-  state.pid = child.pid ?? 0;
-  await writeTrialState(state);
+  await (0, import_promises.mkdir)(stateDir, { recursive: true, mode: 493 });
+  const logFd = (0, import_node_fs.openSync)(trialLogFile(), "a", 384);
+  try {
+    const child = spawnDetached(process.execPath, workerArgv(entryScript(), o), logFd);
+    state.pid = child.pid ?? 0;
+  } finally {
+    (0, import_node_fs.closeSync)(logFd);
+  }
+  if (!await workerStarted(opts.startTimeoutMs ?? 1e4)) {
+    throw new Error("The trial worker did not start; nothing was changed. See " + trialLogFile());
+  }
   return state;
+}
+async function workerStarted(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (; ; ) {
+    const state = await readTrialState();
+    if (state && state.phase !== "starting") return true;
+    if (Date.now() >= deadline) return false;
+    await (0, import_promises2.setTimeout)(250);
+  }
 }
 async function followTrial(o = {}) {
   const deadline = Date.now() + (o.timeoutMs ?? TRIAL_FOLLOW_MS);
@@ -11522,7 +11541,7 @@ async function runConnectTrial(o) {
     try {
       await tryNetplanConnection(o.candidate, o.iface, o.ssid);
       try {
-        await (0, import_promises3.copyFile)(o.candidate, saved, import_node_fs.constants.COPYFILE_EXCL);
+        await (0, import_promises3.copyFile)(o.candidate, saved, import_node_fs2.constants.COPYFILE_EXCL);
       } catch (error) {
         throw new Error(`Connected to "${o.ssid}" but could not save it for reboot: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -11693,7 +11712,7 @@ async function editNetplan(ssid, changes, requestedIface) {
       if (await (0, import_promises3.readFile)(source, "utf8") !== original) throw new Error("The Netplan source changed during the edit; review it before retrying");
       const staged = `${source}.openwifi-${process.pid}`;
       try {
-        await (0, import_promises3.copyFile)(candidate, staged, import_node_fs.constants.COPYFILE_EXCL);
+        await (0, import_promises3.copyFile)(candidate, staged, import_node_fs2.constants.COPYFILE_EXCL);
         await (0, import_promises3.chmod)(staged, info.mode & 511);
         await (0, import_promises3.rename)(staged, source);
       } finally {
@@ -12256,7 +12275,7 @@ async function guided(rawArgv) {
 }
 
 // src/version.ts
-var VERSION = "0.2.0-beta.8";
+var VERSION = "0.2.0-beta.9";
 
 // src/upgrade.ts
 var UPGRADE_REPO = "https://github.com/tanulmittal/wifi-cli.git";
@@ -12594,11 +12613,11 @@ program2.command("upgrade").description("Install the newest tagged release from 
     handleErr(e2, raw(["upgrade"]));
   }
 });
-program2.command("__trial", { hidden: true }).requiredOption("--interface <name>").requiredOption("--ssid <ssid>").requiredOption("--candidate <path>").action(async (opts) => {
+program2.command("__trial", { hidden: true }).requiredOption("--iface <name>").requiredOption("--ssid <ssid>").requiredOption("--candidate <path>").action(async (opts) => {
   try {
-    process.exitCode = await runConnectTrial({ iface: opts.interface, ssid: opts.ssid, candidate: opts.candidate });
+    process.exitCode = await runConnectTrial({ iface: opts.iface, ssid: opts.ssid, candidate: opts.candidate });
   } catch (error) {
-    await recordTrialFailure(opts.ssid, opts.interface, error);
+    await recordTrialFailure(opts.ssid, opts.iface, error);
     process.exitCode = 1;
   }
 });

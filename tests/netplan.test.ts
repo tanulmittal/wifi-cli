@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
 import { connectNetplan, editNetplan, forgetNetplan, isOpenwifiProfile, netplanCandidate, parseConfSsids, parseWpaNetworks, removeNewTrialCopies, repairGeneratedConf, requireNetplanForget, runConnectTrial, setGeneratedConfDirForTests, setNetplanDirForTests, setNetplanTempRootForTests, setTrialStarter, tryNetplanConnection, ungeneratedSsids, useNetplan } from '../src/adapters/netplan.js';
-import { readTrialState, setTrialSpawnerForTests, setTrialStateDirForTests, trialLogFile, trialStateFile, writeTrialState } from '../src/trial.js';
+import { readTrialState, setTrialSpawnerForTests, setTrialStateDirForTests, startDetachedTrial, trialLogFile, trialStateFile, writeTrialState } from '../src/trial.js';
 import { setRunner } from '../src/util.js';
 
 test('Netplan candidate contains one target AP and WPA credentials in system format', () => {
@@ -231,7 +231,12 @@ test('Netplan connect starts a detached trial worker and keeps the password out 
   setNetplanTempRootForTests(dir);
   setTrialStateDirForTests(join(dir, 'state'));
   const spawned: string[][] = [];
-  setTrialSpawnerForTests((cmd, argv) => { spawned.push([cmd, ...argv]); return { pid: 4242, unref: () => {} }; });
+  setTrialSpawnerForTests((cmd, argv) => {
+    spawned.push([cmd, ...argv]);
+    // Stand-in for the real worker: move the state off 'starting' so the caller can return.
+    void writeTrialState({ phase: 'trying', ssid: 'New WiFi', iface: 'wlp2s0', pid: 4242, startedAt: new Date().toISOString(), stateFile: trialStateFile(), logFile: trialLogFile() });
+    return { pid: 4242, unref: () => {} };
+  });
   setRunner(async (cmd, args) => {
     if (cmd === 'netplan' && args[0] === 'get') return { stdout: 'wlp2s0:\n  access-points:\n    Airtel_tanu_0405: {}\n', stderr: '' };
     if (cmd === 'wpa_cli' && args.includes('status')) return { stdout: 'wpa_state=COMPLETED\nssid=Airtel_tanu_0405\n', stderr: '' };
@@ -245,6 +250,7 @@ test('Netplan connect starts a detached trial worker and keeps the password out 
     assert.equal(state.pid, 4242);
     assert.equal(spawned.length, 1);
     assert.ok(spawned[0].includes('__trial'), 'the worker runs the hidden trial command');
+    assert.ok(spawned[0].includes('--iface'), 'the worker must not reuse the global --interface option');
     assert.ok(!spawned[0].join(' ').includes('p@ssw0rd123'), 'the password must never reach the worker arguments');
     const candidate = spawned[0][spawned[0].indexOf('--candidate') + 1];
     assert.ok(candidate.startsWith(join(dir, 'openwifi')));
@@ -332,6 +338,17 @@ test('the detached worker records a rollback and saves nothing when the trial ca
 });
 
 test('use selects an existing runtime network without writing configuration', async () => {
+test('a trial worker that never starts is reported instead of looking like a running trial', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openwifi-worker-start-test-'));
+  setTrialStateDirForTests(dir);
+  setTrialSpawnerForTests(() => ({ pid: 7, unref: () => {} }));
+  try {
+    await assert.rejects(
+      startDetachedTrial({ iface: 'wlp2s0', ssid: 'X', candidate: join(dir, 'candidate.yaml') }, { startTimeoutMs: 400 }),
+      /did not start/);
+  } finally { setTrialSpawnerForTests(null); setTrialStateDirForTests(null); await rm(dir, { recursive: true, force: true }); }
+});
+
   const getuid = process.getuid;
   (process as any).getuid = () => 0;
   const selected: string[] = [];

@@ -30,11 +30,14 @@ type Spawned = {
     pid?: number;
     unref: () => void;
 };
-export declare function setTrialSpawnerForTests(spawner: ((cmd: string, argv: string[]) => Spawned) | null): void;
+type Spawner = (cmd: string, argv: string[], logFd: number) => Spawned;
+export declare function setTrialSpawnerForTests(spawner: Spawner | null): void;
 export declare function startDetachedTrial(o: {
     iface: string;
     ssid: string;
     candidate: string;
+}, opts?: {
+    startTimeoutMs?: number;
 }): Promise<TrialState>;
 export declare function followTrial(o?: {
     timeoutMs?: number;

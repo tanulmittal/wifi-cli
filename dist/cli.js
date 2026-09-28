@@ -383,15 +383,15 @@ program.command('upgrade')
 // Hidden worker command: see src/trial.ts. It must run outside the SSH session that started the
 // trial, which is why `connect` re-executes the CLI instead of confirming the trial in-process.
 program.command('__trial', { hidden: true })
-    .requiredOption('--interface <name>')
+    .requiredOption('--iface <name>')
     .requiredOption('--ssid <ssid>')
     .requiredOption('--candidate <path>')
     .action(async (opts) => {
     try {
-        process.exitCode = await runConnectTrial({ iface: opts.interface, ssid: opts.ssid, candidate: opts.candidate });
+        process.exitCode = await runConnectTrial({ iface: opts.iface, ssid: opts.ssid, candidate: opts.candidate });
     }
     catch (error) {
-        await recordTrialFailure(opts.ssid, opts.interface, error);
+        await recordTrialFailure(opts.ssid, opts.iface, error);
         process.exitCode = 1;
     }
 });
