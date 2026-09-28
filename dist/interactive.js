@@ -1,7 +1,13 @@
 import * as p from '@clack/prompts';
 import { adapter } from './adapters/index.js';
 import { isAuthError, sudoHint } from './util.js';
-import { requireConnectBackend } from './adapters/linux.js';
+import { backend, requireConnectBackend } from './adapters/linux.js';
+export async function confirmRemoteWifiSwitch() {
+    if (await backend() !== 'wpa_cli')
+        return true;
+    const accepted = await p.confirm({ message: 'Switching WiFi may drop SSH. Netplan tries to roll back after 90 seconds. Do you have physical console access?' });
+    return !p.isCancel(accepted) && accepted === true;
+}
 export async function guided(rawArgv) {
     p.intro('openwifi — friendly WiFi manager');
     const ad = adapter();
@@ -34,6 +40,10 @@ export async function guided(rawArgv) {
         else if (action === 'connect') {
             if (ad.kind === 'linux')
                 await requireConnectBackend();
+            if (ad.kind === 'linux' && !await confirmRemoteWifiSwitch()) {
+                p.cancel('Kept the current connection.');
+                return;
+            }
             const s = p.spinner();
             s.start('Scanning…');
             const nets = await ad.scan().catch((e) => { p.log.warn(`Scan unavailable: ${e.message}`); return []; });

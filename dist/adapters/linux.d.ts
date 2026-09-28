@@ -23,8 +23,8 @@ export declare const linux: {
         iface?: string;
         timeoutMs?: number;
         save?: boolean;
-    }): Promise<import("../util.js").RunResult>;
-    list(): Promise<Profile[]>;
+    }): Promise<void | import("../util.js").RunResult>;
+    list(iface?: string): Promise<Profile[]>;
     status(iface?: string): Promise<{
         backend: "iwctl";
         detail: string;

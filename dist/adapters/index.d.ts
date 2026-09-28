@@ -7,8 +7,8 @@ export declare function adapter(): {
         iface?: string;
         timeoutMs?: number;
         save?: boolean;
-    }): Promise<import("../util.js").RunResult>;
-    list(): Promise<import("./linux.js").Profile[]>;
+    }): Promise<void | import("../util.js").RunResult>;
+    list(iface?: string): Promise<import("./linux.js").Profile[]>;
     status(iface?: string): Promise<{
         backend: "iwctl";
         detail: string;

@@ -4,4 +4,4 @@
 
 The CLI must use the operating system's WiFi and credential stores, keep passwords out of logs, explain missing privileges, and fail before changing state when an operation is unsupported. Normal commands must work offline after installation; `upgrade` intentionally fetches from the public GitHub repository.
 
-NetworkManager is the full Linux writer in the current release. `iwctl` and `wpa_cli` support read-only status and discovery. Netplan-managed saved networks cannot yet be changed by `openwifi`. macOS uses system WiFi tools. Windows, enterprise EAP setup, static IP/DNS, and BSSID pinning remain out of scope.
+NetworkManager is the full Linux writer. `iwctl` supports status and discovery. On Netplan-managed `wpa_supplicant` hosts, connection to WPA-Personal and open networks is experimental: require root, warn about remote access, use a timed Netplan trial, verify SSID and IP, then save a root-only system profile. Other Netplan writes remain unsupported. macOS uses system WiFi tools. Windows, enterprise EAP setup, static IP/DNS, and BSSID pinning remain out of scope.

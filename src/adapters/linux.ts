@@ -1,5 +1,6 @@
 import { run, which, failClosed } from '../util.js';
 import { setTimeout as delay } from 'node:timers/promises';
+import { connectNetplan, parseWpaNetworks } from './netplan.js';
 
 export type Net = { ssid: string; signal: number; security: string; bssid?: string; freq?: string };
 export type Profile = { name: string; uuid?: string; type?: string };
@@ -14,7 +15,11 @@ export async function backend(): Promise<'nmcli' | 'iwctl' | 'wpa_cli' | 'none'>
 export async function requireConnectBackend(): Promise<void> {
   const found = await backend();
   if (found === 'nmcli') return;
-  if (found === 'iwctl' || found === 'wpa_cli') failClosed(`Connecting needs NetworkManager (nmcli); ${found} supports scan/status only. If this is a remote server, do not replace its active network manager over SSH`);
+  if (found === 'wpa_cli' && await which('netplan')) {
+    if (process.getuid?.() !== 0) throw new Error('Connecting through Netplan requires root privileges');
+    return;
+  }
+  if (found === 'iwctl' || found === 'wpa_cli') failClosed(`Connecting needs NetworkManager (nmcli) or Netplan with wpa_cli; ${found} alone supports scan/status only`);
   failClosed('No WiFi manager found. Run openwifi doctor. Connecting needs NetworkManager (nmcli)');
 }
 
@@ -76,6 +81,7 @@ export const linux = {
   },
   async connect(ssid: string, o: { password?: string; hidden?: boolean; iface?: string; timeoutMs?: number; save?: boolean } = {}) {
     await requireConnectBackend();
+    if (await backend() === 'wpa_cli') return connectNetplan(ssid, o);
     const args = ['device', 'wifi', 'connect', ssid];
     if (o.password) args.push('password', o.password);
     if (o.hidden) args.push('hidden', 'yes');
@@ -83,7 +89,11 @@ export const linux = {
     if (o.save === false) failClosed('--no-save on Linux (nmcli would save the connection)');
     return run('nmcli', args, { timeoutMs: o.timeoutMs ?? 30000, secrets: o.password ? [o.password] : [] });
   },
-  async list(): Promise<Profile[]> {
+  async list(iface?: string): Promise<Profile[]> {
+    if (await backend() === 'wpa_cli') {
+      const { stdout } = await run('wpa_cli', wpaArgs(iface, 'list_networks'));
+      return parseWpaNetworks(stdout).map(n => ({ name: n.ssid, type: 'wpa_supplicant' }));
+    }
     await requireNmcli('Listing saved networks');
     const { stdout } = await run('nmcli', ['-t', '-f', 'NAME,UUID,TYPE', 'connection', 'show']);
     return stdout.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
@@ -155,7 +165,8 @@ export const linux = {
     } else if (b === 'wpa_cli') {
       const connected = await linux.status(iface).then(s => 'state' in s && s.state === 'COMPLETED').catch(() => false);
       checks.push({ name: 'connection', ok: connected, hint: connected ? 'WiFi is connected through wpa_supplicant.' : 'Could not confirm WiFi status. Try: sudo openwifi doctor --interface <WiFi interface>' });
-      checks.push({ name: 'note', ok: true, hint: 'Scan/status supported. Connect, saved networks, edit, and forget need NetworkManager; do not replace the active network service over SSH.' });
+      const hasNetplan = await which('netplan');
+      checks.push({ name: 'note', ok: hasNetplan, hint: hasNetplan ? 'Netplan connection trials are available with sudo and physical console backup. Edit/forget still need NetworkManager.' : 'Scan/status supported. Connecting needs Netplan or NetworkManager.' });
     }
     return checks;
   },

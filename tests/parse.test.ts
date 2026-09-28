@@ -135,6 +135,7 @@ test('wpa_supplicant is detected for status/scan and writes fail before changing
       throw new Error('missing');
     }
     if (args.includes('status')) return { stdout: 'ssid=My Home\nwpa_state=COMPLETED\n', stderr: '' };
+    if (args.includes('list_networks')) return { stdout: 'network id / ssid / bssid / flags\n0\tMy Home\tany\t[CURRENT]\n', stderr: '' };
     if (args.includes('scan_results')) return { stdout: 'bssid / frequency / signal level / flags / ssid\naa:bb:cc:dd:ee:ff\t2412\t-60\t[WPA2-PSK]\tMy Home\n', stderr: '' };
     if (args.includes('scan')) return { stdout: 'OK\n', stderr: '' };
     throw new Error(`Unexpected command: ${cmd}`);
@@ -145,7 +146,7 @@ test('wpa_supplicant is detected for status/scan and writes fail before changing
     const checks = await linux.doctor('wlp2s0');
     assert.equal(checks.find(c => c.name === 'connection')?.ok, true);
     await assert.rejects(linux.connect('Other', { password: 'secret' }), /Connecting needs NetworkManager/);
-    await assert.rejects(linux.list(), /Listing saved networks needs NetworkManager/);
+    assert.equal((await linux.list('wlp2s0'))[0].name, 'My Home');
     await assert.rejects(linux.disconnect('wlp2s0'), /Disconnect needs NetworkManager/);
     await assert.rejects(linux.forget('My Home'), /Forget needs NetworkManager/);
     await assert.rejects(linux.radio(false), /Changing radio power needs NetworkManager/);

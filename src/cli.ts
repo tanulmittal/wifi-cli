@@ -3,15 +3,15 @@ import { Command } from 'commander';
 import * as p from '@clack/prompts';
 import { adapter } from './adapters/index.js';
 import { isAuthError, sudoHint, printJson, failClosed } from './util.js';
-import { guided } from './interactive.js';
-import { requireConnectBackend } from './adapters/linux.js';
+import { guided, confirmRemoteWifiSwitch } from './interactive.js';
+import { backend, requireConnectBackend } from './adapters/linux.js';
 import { upgradeFromGithub } from './upgrade.js';
 
 const program = new Command();
 program
   .name('openwifi')
   .description('Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.')
-  .version('0.1.4')
+  .version('0.2.0-beta.1')
   .option('--interface <name>', 'WiFi interface (e.g. wlan0, en0)')
   .option('--timeout <sec>', 'command timeout in seconds', '25')
   .option('--json', 'machine-readable JSON output')
@@ -50,6 +50,10 @@ program.command('connect <ssid>')
   .action(async (ssid, opts) => {
     try {
       if (process.platform === 'linux') await requireConnectBackend();
+      if (process.platform === 'linux' && await backend() === 'wpa_cli' && !program.opts().yes) {
+        if (!process.stdin.isTTY) throw new Error('Switching WiFi through Netplan needs confirmation; run interactively or pass --yes if you have console access.');
+        if (!await confirmRemoteWifiSwitch()) { console.log('Kept the current connection.'); return; }
+      }
       let pw = opts.password;
       if (pw === undefined && process.stdin.isTTY) {
         const v = await p.password({ message: `Password for "${ssid}" (empty if open)`, mask: '•' });

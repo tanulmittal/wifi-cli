@@ -3845,7 +3845,134 @@ function failClosed(msg) {
 }
 
 // src/adapters/linux.ts
-var import_promises = require("node:timers/promises");
+var import_promises3 = require("node:timers/promises");
+
+// src/adapters/netplan.ts
+var import_node_child_process2 = require("node:child_process");
+var import_node_crypto = require("node:crypto");
+var import_promises = require("node:fs/promises");
+var import_node_fs = require("node:fs");
+var import_promises2 = require("node:timers/promises");
+var startTrial = (args) => (0, import_node_child_process2.spawn)("netplan", args, { stdio: ["pipe", "ignore", "ignore"] });
+function netplanCandidate(iface, ssid, password, hidden = false) {
+  const profile = password ? { password, ...hidden ? { hidden: true } : {} } : hidden ? { hidden: true } : {};
+  return JSON.stringify({ network: { version: 2, wifis: { [iface]: { "access-points": { [ssid]: profile } } } } }, null, 2) + "\n";
+}
+function parseWpaNetworks(text) {
+  return text.split("\n").map((line) => {
+    const [id, ssid] = line.replace(/\r$/, "").split("	");
+    return /^\d+$/.test(id ?? "") && ssid ? { id, ssid } : null;
+  }).filter((item) => item !== null);
+}
+async function tryNetplanConnection(candidate, iface, ssid) {
+  const trial = startTrial(["try", "--config-file", candidate, "--timeout", "90"]);
+  let ended = false;
+  const exited = new Promise((resolve) => {
+    trial.once("error", () => {
+      ended = true;
+      resolve(1);
+    });
+    trial.once("exit", (code) => {
+      ended = true;
+      resolve(code ?? 1);
+    });
+  });
+  try {
+    let networkId;
+    for (let attempt = 0; attempt < 30 && !ended; attempt++) {
+      await (0, import_promises2.setTimeout)(1e3);
+      const networks = await wpa(iface, "list_networks").then(parseWpaNetworks).catch(() => []);
+      networkId = networks.find((n) => n.ssid === ssid)?.id;
+      if (networkId) break;
+    }
+    if (!networkId) throw new Error(`Netplan did not make "${ssid}" available. The trial will be rolled back.`);
+    if (!(await wpa(iface, "select_network", networkId)).endsWith("OK")) throw new Error(`Could not select "${ssid}". The trial will be rolled back.`);
+    let connected = false;
+    for (let attempt = 0; attempt < 45 && !ended; attempt++) {
+      await (0, import_promises2.setTimeout)(1e3);
+      const status = await wpa(iface, "status").catch(() => "");
+      if (status.includes("wpa_state=COMPLETED") && status.split("\n").includes(`ssid=${ssid}`)) {
+        const address = await run("ip", ["-4", "-o", "addr", "show", "dev", iface]).then((r2) => r2.stdout).catch(() => "");
+        if (/\binet\s+\d/.test(address)) {
+          connected = true;
+          break;
+        }
+      }
+    }
+    if (!connected) throw new Error(`Could not confirm "${ssid}" with an IP address. The trial will be rolled back.`);
+    trial.kill("SIGUSR1");
+    const result = await exited;
+    if (result !== 0) throw new Error("Netplan did not confirm the connection; nothing was saved.");
+  } catch (e2) {
+    if (!ended) {
+      trial.kill("SIGINT");
+      await exited.catch(() => {
+      });
+    }
+    throw e2;
+  }
+}
+async function wifiInterface(requested) {
+  if (requested) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(requested)) failClosed("Invalid WiFi interface name");
+    return requested;
+  }
+  const names = await (0, import_promises.readdir)("/sys/class/net");
+  const wireless = (await Promise.all(names.map(async (name) => {
+    try {
+      await (0, import_promises.access)(`/sys/class/net/${name}/wireless`);
+      return name;
+    } catch {
+      return null;
+    }
+  }))).filter((name) => name !== null);
+  if (wireless.length !== 1) failClosed("Choose a WiFi interface with --interface (run: ip -br link)");
+  return wireless[0];
+}
+async function wpa(iface, command, arg) {
+  const { stdout } = await run("wpa_cli", ["-i", iface, command, ...arg ? [arg] : []], { timeoutMs: 8e3 });
+  return stdout.trim();
+}
+async function connectNetplan(ssid, options = {}) {
+  if (!ssid || Buffer.byteLength(ssid, "utf8") > 32 || /[\0\n\r]/.test(ssid)) failClosed("WiFi name must be one non-empty line of at most 32 bytes");
+  if (options.password && (options.password.length < 8 || options.password.length > 63 || /[\x00-\x1f\x7f]/.test(options.password))) failClosed("WPA password must be 8\u201363 printable characters");
+  if (options.save === false) failClosed("Temporary Netplan connections are not supported");
+  if (process.getuid?.() !== 0) throw new Error("Connecting through Netplan requires root privileges");
+  const iface = await wifiInterface(options.iface);
+  const { stdout: configured } = await run("netplan", ["get", `wifis.${iface}`]);
+  if (!configured.trim() || configured.trim() === "null") failClosed(`${iface} is not configured by Netplan`);
+  const current = await wpa(iface, "status");
+  if (!current.includes("wpa_state=COMPLETED")) failClosed("Current WiFi is not connected; use the system console to repair it first");
+  if (current.split("\n").includes(`ssid=${ssid}`)) return;
+  const scans = await wpa(iface, "scan_results").catch(() => "");
+  const match = scans.split("\n").slice(1).map((line) => line.split("	")).find((fields) => fields.slice(4).join("	") === ssid);
+  const flags = match?.[3] ?? "";
+  if (/EAP|802\.1X/i.test(flags) || /SAE/i.test(flags) && !/PSK/i.test(flags)) failClosed("Enterprise and WPA3-only networks need a separate authentication setup");
+  if (/WPA|RSN/i.test(flags) && !options.password) failClosed(`"${ssid}" needs a password`);
+  const filename = `90-openwifi-${iface}-${(0, import_node_crypto.createHash)("sha256").update(ssid).digest("hex").slice(0, 12)}.yaml`;
+  const saved = `/etc/netplan/${filename}`;
+  try {
+    await (0, import_promises.access)(saved);
+    failClosed(`A profile for "${ssid}" already exists; edit the saved network instead`);
+  } catch (e2) {
+    if (e2.code !== "ENOENT") throw e2;
+  }
+  const tempDir = await (0, import_promises.mkdtemp)("/run/openwifi-");
+  const candidate = `${tempDir}/${filename}`;
+  try {
+    await (0, import_promises.writeFile)(candidate, netplanCandidate(iface, ssid, options.password, options.hidden), { mode: 384, flag: "wx" });
+    await tryNetplanConnection(candidate, iface, ssid);
+    try {
+      await (0, import_promises.copyFile)(candidate, saved, import_node_fs.constants.COPYFILE_EXCL);
+    } catch (error) {
+      throw new Error(`Connected to "${ssid}" but could not save it for reboot: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  } finally {
+    await (0, import_promises.rm)(tempDir, { recursive: true, force: true });
+  }
+}
+
+// src/adapters/linux.ts
 async function backend() {
   if (await which("nmcli")) return "nmcli";
   if (await which("iwctl")) return "iwctl";
@@ -3855,7 +3982,11 @@ async function backend() {
 async function requireConnectBackend() {
   const found = await backend();
   if (found === "nmcli") return;
-  if (found === "iwctl" || found === "wpa_cli") failClosed(`Connecting needs NetworkManager (nmcli); ${found} supports scan/status only. If this is a remote server, do not replace its active network manager over SSH`);
+  if (found === "wpa_cli" && await which("netplan")) {
+    if (process.getuid?.() !== 0) throw new Error("Connecting through Netplan requires root privileges");
+    return;
+  }
+  if (found === "iwctl" || found === "wpa_cli") failClosed(`Connecting needs NetworkManager (nmcli) or Netplan with wpa_cli; ${found} alone supports scan/status only`);
   failClosed("No WiFi manager found. Run openwifi doctor. Connecting needs NetworkManager (nmcli)");
 }
 async function requireNmcli(action) {
@@ -3903,7 +4034,7 @@ var linux = {
     if (b3 === "wpa_cli") {
       const { stdout: requested } = await run("wpa_cli", wpaArgs(iface, "scan"), { timeoutMs });
       if (!requested.trim().endsWith("OK")) throw new Error("WiFi scan was refused by wpa_supplicant. Try again after the current scan finishes.");
-      await (0, import_promises.setTimeout)(1500);
+      await (0, import_promises3.setTimeout)(1500);
       const { stdout } = await run("wpa_cli", wpaArgs(iface, "scan_results"), { timeoutMs });
       return parseWpaResults(stdout);
     }
@@ -3911,6 +4042,7 @@ var linux = {
   },
   async connect(ssid, o = {}) {
     await requireConnectBackend();
+    if (await backend() === "wpa_cli") return connectNetplan(ssid, o);
     const args = ["device", "wifi", "connect", ssid];
     if (o.password) args.push("password", o.password);
     if (o.hidden) args.push("hidden", "yes");
@@ -3918,7 +4050,11 @@ var linux = {
     if (o.save === false) failClosed("--no-save on Linux (nmcli would save the connection)");
     return run("nmcli", args, { timeoutMs: o.timeoutMs ?? 3e4, secrets: o.password ? [o.password] : [] });
   },
-  async list() {
+  async list(iface) {
+    if (await backend() === "wpa_cli") {
+      const { stdout: stdout2 } = await run("wpa_cli", wpaArgs(iface, "list_networks"));
+      return parseWpaNetworks(stdout2).map((n) => ({ name: n.ssid, type: "wpa_supplicant" }));
+    }
     await requireNmcli("Listing saved networks");
     const { stdout } = await run("nmcli", ["-t", "-f", "NAME,UUID,TYPE", "connection", "show"]);
     return stdout.split("\n").map((l2) => l2.trim()).filter(Boolean).map((l2) => {
@@ -3993,7 +4129,8 @@ var linux = {
     } else if (b3 === "wpa_cli") {
       const connected = await linux.status(iface).then((s) => "state" in s && s.state === "COMPLETED").catch(() => false);
       checks.push({ name: "connection", ok: connected, hint: connected ? "WiFi is connected through wpa_supplicant." : "Could not confirm WiFi status. Try: sudo openwifi doctor --interface <WiFi interface>" });
-      checks.push({ name: "note", ok: true, hint: "Scan/status supported. Connect, saved networks, edit, and forget need NetworkManager; do not replace the active network service over SSH." });
+      const hasNetplan = await which("netplan");
+      checks.push({ name: "note", ok: hasNetplan, hint: hasNetplan ? "Netplan connection trials are available with sudo and physical console backup. Edit/forget still need NetworkManager." : "Scan/status supported. Connecting needs Netplan or NetworkManager." });
     }
     return checks;
   }
@@ -4123,6 +4260,11 @@ function adapter() {
 }
 
 // src/interactive.ts
+async function confirmRemoteWifiSwitch() {
+  if (await backend() !== "wpa_cli") return true;
+  const accepted = await ce({ message: "Switching WiFi may drop SSH. Netplan tries to roll back after 90 seconds. Do you have physical console access?" });
+  return !lD(accepted) && accepted === true;
+}
 async function guided(rawArgv) {
   pe("openwifi \u2014 friendly WiFi manager");
   const ad = adapter();
@@ -4152,6 +4294,10 @@ async function guided(rawArgv) {
       for (const n of nets.slice(0, 25)) console.log(`  ${String(n.signal).padStart(3)}%  ${n.ssid}  (${n.security})`);
     } else if (action === "connect") {
       if (ad.kind === "linux") await requireConnectBackend();
+      if (ad.kind === "linux" && !await confirmRemoteWifiSwitch()) {
+        he("Kept the current connection.");
+        return;
+      }
       const s = _2();
       s.start("Scanning\u2026");
       const nets = await ad.scan().catch((e2) => {
@@ -4264,7 +4410,7 @@ async function upgradeFromGithub() {
 
 // src/cli.ts
 var program2 = new Command();
-program2.name("openwifi").description("Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.").version("0.1.4").option("--interface <name>", "WiFi interface (e.g. wlan0, en0)").option("--timeout <sec>", "command timeout in seconds", "25").option("--json", "machine-readable JSON output").option("--yes", "skip confirmations (scripts)");
+program2.name("openwifi").description("Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.").version("0.2.0-beta.1").option("--interface <name>", "WiFi interface (e.g. wlan0, en0)").option("--timeout <sec>", "command timeout in seconds", "25").option("--json", "machine-readable JSON output").option("--yes", "skip confirmations (scripts)");
 var tmo = () => {
   const seconds = Number(program2.opts().timeout ?? 25);
   if (!Number.isFinite(seconds) || seconds <= 0) throw new Error("--timeout must be a positive number of seconds");
@@ -4296,6 +4442,13 @@ program2.command("scan").description("Search nearby WiFi networks").action(async
 program2.command("connect <ssid>").description("Connect to a WiFi network (prompts for password if needed)").option("-p, --password <pw>", "password (prefer interactive prompt; shell history risk)").option("--hidden", "hidden SSID").option("--no-save", "unsupported in v1; exits before changing anything").action(async (ssid, opts) => {
   try {
     if (process.platform === "linux") await requireConnectBackend();
+    if (process.platform === "linux" && await backend() === "wpa_cli" && !program2.opts().yes) {
+      if (!process.stdin.isTTY) throw new Error("Switching WiFi through Netplan needs confirmation; run interactively or pass --yes if you have console access.");
+      if (!await confirmRemoteWifiSwitch()) {
+        console.log("Kept the current connection.");
+        return;
+      }
+    }
     let pw = opts.password;
     if (pw === void 0 && process.stdin.isTTY) {
       const v3 = await oe({ message: `Password for "${ssid}" (empty if open)`, mask: "\u2022" });
