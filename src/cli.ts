@@ -11,7 +11,7 @@ const program = new Command();
 program
   .name('openwifi')
   .description('Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.')
-  .version('0.2.0-beta.5')
+  .version('0.2.0-beta.6')
   .option('--interface <name>', 'WiFi interface (e.g. wlan0, en0)')
   .option('--timeout <sec>', 'command timeout in seconds', '25')
   .option('--json', 'machine-readable JSON output')
@@ -83,7 +83,15 @@ program.command('status')
 program.command('disconnect')
   .description('Disconnect from current WiFi')
   .action(async () => {
-    try { const ad: any = adapter(); await ad.disconnect(program.opts().interface); if (program.opts().json) printJson({ ok: true }); else console.log('Disconnected.'); }
+    try {
+      if (!await confirmLinkLoss('Disconnecting WiFi may drop SSH and the system may reconnect automatically. Continue?')) return;
+      const ad: any = adapter();
+      await ad.disconnect(program.opts().interface);
+      const temporary = process.platform === 'linux' && await backend() === 'wpa_cli';
+      const state = temporary ? await ad.status(program.opts().interface).then((s: any) => s.state).catch(() => 'unknown') : undefined;
+      if (program.opts().json) printJson({ ok: true, ...(temporary ? { temporary, state } : {}) });
+      else console.log(state === 'COMPLETED' ? 'The system reconnected automatically.' : temporary ? 'Disconnected for now; the system may reconnect automatically.' : 'Disconnected.');
+    }
     catch (e) { handleErr(e, raw(['disconnect'])); }
   });
 
@@ -106,7 +114,7 @@ program.command('forget <profile>').description('Forget / remove a saved network
 program.command('remove <profile>').description('Alias of forget').action(forget);
 
 program.command('edit <profile>')
-  .description('Edit password, autoconnect, priority, rename (NetworkManager only)')
+  .description('Edit password or SSID; autoconnect/priority require NetworkManager')
   .option('--new-password <pw>', 'new password')
   .option('--autoconnect <on|off>', 'toggle autoconnect (Linux only)')
   .option('--priority <n>', 'autoconnect priority (Linux only)')
@@ -122,14 +130,23 @@ program.command('edit <profile>')
       }
       if (opts.autoconnect && !/^(on|off)$/.test(opts.autoconnect)) failClosed('--autoconnect must be on|off');
       if (opts.priority !== undefined && (!Number.isInteger(Number(opts.priority)) || Number(opts.priority) < -999 || Number(opts.priority) > 999)) failClosed('--priority must be an integer between -999 and 999');
+      if (process.platform === 'linux' && await backend() === 'wpa_cli' && (opts.autoconnect || opts.priority !== undefined)) failClosed('Netplan has no per-profile autoconnect or priority setting');
+      if (!await confirmLinkLoss('Editing the current WiFi may drop SSH. Continue with physical console access?')) return;
       const ad: any = adapter();
-      await ad.edit(profile, { newPassword: npw, autoconnect: opts.autoconnect, priority: opts.priority !== undefined ? Number(opts.priority) : undefined, rename: opts.rename });
+      await ad.edit(profile, { newPassword: npw, autoconnect: opts.autoconnect, priority: opts.priority !== undefined ? Number(opts.priority) : undefined, rename: opts.rename }, program.opts().interface);
       if (program.opts().json) printJson({ ok: true, edited: profile }); else console.log(`Saved "${profile}".`);
     } catch (e) { handleErr(e, raw(['edit', profile])); }
   });
 
+async function confirmLinkLoss(message: string): Promise<boolean> {
+  if (process.platform !== 'linux' || await backend() !== 'wpa_cli' || program.opts().yes) return true;
+  if (!process.stdin.isTTY) throw new Error('This may drop SSH; run interactively or pass --yes with physical console access.');
+  const answer = await p.confirm({ message });
+  return !p.isCancel(answer) && answer === true;
+}
+
 program.command('on').description('Turn WiFi on').action(async () => { try { const ad: any = adapter(); await ad.radio(true, program.opts().interface); if (program.opts().json) printJson({ ok: true, radio: 'on' }); else console.log('WiFi on.'); } catch (e) { handleErr(e, raw(['on'])); } });
-program.command('off').description('Turn WiFi off').action(async () => { try { const ad: any = adapter(); await ad.radio(false, program.opts().interface); if (program.opts().json) printJson({ ok: true, radio: 'off' }); else console.log('WiFi off.'); } catch (e) { handleErr(e, raw(['off'])); } });
+program.command('off').description('Turn WiFi off').action(async () => { try { if (!await confirmLinkLoss('Turning WiFi off will drop SSH. Continue with physical console access?')) return; const ad: any = adapter(); await ad.radio(false, program.opts().interface); if (program.opts().json) printJson({ ok: true, radio: 'off' }); else console.log('WiFi off.'); } catch (e) { handleErr(e, raw(['off'])); } });
 
 program.command('doctor')
   .description('Troubleshoot: adapter, radio, scan, connection, DNS with fix hints')

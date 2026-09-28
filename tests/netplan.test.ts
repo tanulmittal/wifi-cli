@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
-import { connectNetplan, forgetNetplan, isOpenwifiProfile, netplanCandidate, parseWpaNetworks, removeNewTrialCopies, requireNetplanForget, setNetplanDirForTests, setTrialStarter, tryNetplanConnection } from '../src/adapters/netplan.js';
+import { connectNetplan, editNetplan, forgetNetplan, isOpenwifiProfile, netplanCandidate, parseWpaNetworks, removeNewTrialCopies, requireNetplanForget, setNetplanDirForTests, setNetplanTempRootForTests, setTrialStarter, tryNetplanConnection } from '../src/adapters/netplan.js';
 import { setRunner } from '../src/util.js';
 
 test('Netplan candidate contains one target AP and WPA credentials in system format', () => {
@@ -108,7 +108,7 @@ test('Netplan forget recognizes and removes a beta.1 escaped-SSID profile', asyn
   const ssid = 'Tanul’s iPhone';
   const escaped = 'Tanul\\xe2\\x80\\x99s iPhone';
   const file = join(dir, `90-openwifi-wlp2s0-${createHash('sha256').update(escaped).digest('hex').slice(0, 12)}.yaml`);
-  const stamped = file.replace(/\.yaml$/, '.1790580022.1488316.yaml');
+  const stamped = `${file}.1790580022.1488316.yaml`;
   const getuid = process.getuid;
   (process as any).getuid = () => 0;
   setNetplanDirForTests(dir);
@@ -141,7 +141,7 @@ test('Netplan trial cleanup removes only newly generated matching timestamp YAML
   const dir = await mkdtemp(join(tmpdir(), 'openwifi-trial-test-'));
   const saved = join(dir, '90-openwifi-wlp2s0-abc123.yaml');
   const old = saved.replace(/\.yaml$/, '.1790580000.100.yaml');
-  const created = saved.replace(/\.yaml$/, '.1790580001.200.yaml');
+  const created = `${saved}.1790580001.200.yaml`;
   const unrelated = saved.replace(/\.yaml$/, '.1790580002.300.yaml');
   setNetplanDirForTests(dir);
   try {
@@ -153,4 +153,71 @@ test('Netplan trial cleanup removes only newly generated matching timestamp YAML
     await access(unrelated);
     await assert.rejects(access(created), { code: 'ENOENT' });
   } finally { setNetplanDirForTests(null); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('Netplan edit preserves unrelated settings, protects permissions, and rejects unsupported fields', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openwifi-edit-test-'));
+  const source = join(dir, '50-existing.yaml');
+  const redundant = join(dir, '50-existing.yaml.1790580159.4213564.yaml');
+  const original = '# Keep this comment\nnetwork:\n  version: 2\n  wifis:\n    wlp2s0:\n      dhcp4: true\n      access-points:\n        Old WiFi:\n          password: oldpass12\n';
+  const getuid = process.getuid;
+  (process as any).getuid = () => 0;
+  setNetplanDirForTests(dir);
+  setNetplanTempRootForTests(dir);
+  const calls: string[] = [];
+  setRunner(async (cmd, args) => {
+    calls.push(`${cmd} ${args.join(' ')}`);
+    if (cmd === 'netplan' && args[0] === 'generate') return { stdout: '', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('status')) return { stdout: 'wpa_state=COMPLETED\nssid=Current WiFi\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('list_networks')) return { stdout: 'network id / ssid / bssid / flags\n0\tCurrent WiFi\tany\t[CURRENT]\n', stderr: '' };
+    throw new Error(`Unexpected command: ${cmd}`);
+  });
+  try {
+    await writeFile(source, original, { mode: 0o600 });
+    await writeFile(redundant, original, { mode: 0o600 });
+    await assert.rejects(editNetplan('Old WiFi', { priority: 2, newPassword: 'newpass123' }, 'wlp2s0'), /no per-profile/);
+    assert.equal(await readFile(source, 'utf8'), original);
+    await editNetplan('Old WiFi', { newPassword: 'newpass123', rename: 'New WiFi' }, 'wlp2s0');
+    const edited = await readFile(source, 'utf8');
+    assert.match(edited, /# Keep this comment/);
+    assert.match(edited, /dhcp4: true/);
+    assert.match(edited, /New WiFi:/);
+    assert.match(edited, /password: newpass123/);
+    assert.doesNotMatch(edited, /Old WiFi:/);
+    assert.equal((await stat(source)).mode & 0o777, 0o600);
+    await assert.rejects(access(redundant), { code: 'ENOENT' });
+    assert.ok(calls.some(call => call.startsWith('netplan generate --root-dir=')));
+  } finally { setRunner(null); setNetplanDirForTests(null); setNetplanTempRootForTests(null); (process as any).getuid = getuid; await rm(dir, { recursive: true, force: true }); }
+});
+
+test('active Netplan edit forces fresh authentication under trial before saving', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openwifi-active-edit-'));
+  const source = join(dir, '50-existing.yaml');
+  const getuid = process.getuid;
+  (process as any).getuid = () => 0;
+  setNetplanDirForTests(dir);
+  setNetplanTempRootForTests(dir);
+  const signals: string[] = [];
+  const calls: string[] = [];
+  const trial = new EventEmitter() as ChildProcess;
+  (trial as any).kill = (signal: string) => { signals.push(signal); queueMicrotask(() => trial.emit('exit', signal === 'SIGUSR1' ? 0 : 1)); return true; };
+  setTrialStarter(args => { calls.push(`netplan ${args.join(' ')}`); return trial; });
+  setRunner(async (cmd, args) => {
+    calls.push(`${cmd} ${args.join(' ')}`);
+    if (cmd === 'netplan' && args[0] === 'generate') return { stdout: '', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('status')) return { stdout: 'wpa_state=COMPLETED\nssid=Old WiFi\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('list_networks')) return { stdout: 'network id / ssid / bssid / flags\n0\tOld WiFi\tany\t[CURRENT]\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('get_network')) return { stdout: '"newpass123"\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('disconnect')) return { stdout: 'OK\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('select_network')) return { stdout: 'OK\n', stderr: '' };
+    if (cmd === 'ip') return { stdout: '3: wlp2s0 inet 192.168.1.5/24\n', stderr: '' };
+    throw new Error(`Unexpected command: ${cmd}`);
+  });
+  try {
+    await writeFile(source, netplanCandidate('wlp2s0', 'Old WiFi', 'oldpass12'), { mode: 0o600 });
+    await editNetplan('Old WiFi', { newPassword: 'newpass123' }, 'wlp2s0');
+    assert.deepEqual(signals, ['SIGUSR1']);
+    assert.ok(calls.findIndex(call => call.includes('disconnect')) < calls.findIndex(call => call.includes('select_network')));
+    assert.match(await readFile(source, 'utf8'), /newpass123/);
+  } finally { setRunner(null); setTrialStarter(null); setNetplanDirForTests(null); setNetplanTempRootForTests(null); (process as any).getuid = getuid; await rm(dir, { recursive: true, force: true }); }
 });

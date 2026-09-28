@@ -1,7 +1,9 @@
 import { run, which, failClosed } from '../util.js';
 import { setTimeout as delay } from 'node:timers/promises';
-import { connectNetplan, forgetNetplan, isOpenwifiProfile, parseWpaNetworks, requireNetplanForget } from './netplan.js';
+import { connectNetplan, editNetplan, forgetNetplan, isOpenwifiProfile, parseWpaNetworks, requireNetplanForget } from './netplan.js';
 import { decodeWpaSsid, validWpaSsid } from './wpa.js';
+import { readlink } from 'node:fs/promises';
+import { basename } from 'node:path';
 
 export type Net = { ssid: string; signal: number; security: string; bssid?: string; freq?: string };
 export type Profile = { name: string; uuid?: string; type?: string };
@@ -123,6 +125,12 @@ export const linux = {
     return { backend: 'nmcli' as const, active: active.trim(), devices: dev.trim() };
   },
   async disconnect(iface?: string) {
+    if (await backend() === 'wpa_cli') {
+      if (process.getuid?.() !== 0) throw new Error('Disconnecting through wpa_supplicant requires root privileges');
+      const { stdout } = await run('wpa_cli', wpaArgs(iface, 'disconnect'));
+      if (stdout.trim() !== 'OK') throw new Error('wpa_supplicant refused to disconnect');
+      return;
+    }
     await requireNmcli('Disconnect');
     if (iface) return run('nmcli', ['device', 'disconnect', iface]);
     const { stdout } = await run('nmcli', ['-t', '-f', 'DEVICE,TYPE,STATE', 'device', 'status']);
@@ -138,8 +146,9 @@ export const linux = {
     if (await backend() === 'wpa_cli' && await which('netplan')) return forgetNetplan(name, iface);
     await requireNmcli('Forget'); return run('nmcli', ['connection', 'delete', 'id', name]);
   },
-  async edit(name: string, o: { newPassword?: string; autoconnect?: 'on' | 'off'; priority?: number; rename?: string }) {
-    if (await backend() !== 'nmcli') failClosed('Edit needs NetworkManager (nmcli)');
+  async edit(name: string, o: { newPassword?: string; autoconnect?: 'on' | 'off'; priority?: number; rename?: string }, iface?: string) {
+    if (await backend() === 'wpa_cli' && await which('netplan')) return editNetplan(name, o, iface);
+    if (await backend() !== 'nmcli') failClosed('Edit needs NetworkManager (nmcli) or Netplan with wpa_cli');
     const changes: string[] = [];
     if (o.newPassword) changes.push('wifi-sec.psk', o.newPassword);
     if (o.autoconnect) changes.push('connection.autoconnect', o.autoconnect === 'on' ? 'yes' : 'no');
@@ -149,6 +158,26 @@ export const linux = {
     await run('nmcli', ['connection', 'modify', 'id', name, ...changes], { secrets: o.newPassword ? [o.newPassword] : [] });
   },
   async radio(on: boolean, iface?: string) {
+    if (await backend() === 'wpa_cli') {
+      if (!await which('rfkill')) failClosed('Radio control requires the installed rfkill command');
+      if (process.getuid?.() !== 0) throw new Error('Changing WiFi radio power requires root privileges');
+      let radioName: string | undefined;
+      if (iface) {
+        if (!/^[a-zA-Z0-9_-]+$/.test(iface)) failClosed('Invalid WiFi interface name');
+        radioName = basename(await readlink(`/sys/class/net/${iface}/phy80211`));
+      }
+      const { stdout: before } = await run('rfkill', ['--output', 'ID,TYPE,DEVICE,SOFT,HARD']);
+      const radios = before.split('\n').slice(1).map(line => line.trim().split(/\s+/)).filter(fields => fields[1] === 'wlan' && (!radioName || fields[2] === radioName));
+      if (radios.length !== 1) failClosed('Choose one WiFi radio with --interface');
+      const entry = radios[0];
+      if (!entry || !/^\d+$/.test(entry[0])) failClosed('Could not identify this WiFi radio with rfkill');
+      if (entry[4] === 'blocked' && on) failClosed('WiFi is blocked by a hardware switch; turn it on physically');
+      await run('rfkill', [on ? 'unblock' : 'block', entry[0]]);
+      const { stdout: after } = await run('rfkill', ['--output', 'ID,TYPE,DEVICE,SOFT,HARD']);
+      const updated = after.split('\n').slice(1).map(line => line.trim().split(/\s+/)).find(fields => fields[0] === entry[0]);
+      if (!updated || updated[3] !== (on ? 'unblocked' : 'blocked')) throw new Error('Could not verify the WiFi radio state after rfkill');
+      return;
+    }
     await requireNmcli('Changing radio power');
     void iface;
     return run('nmcli', ['radio', 'wifi', on ? 'on' : 'off']);

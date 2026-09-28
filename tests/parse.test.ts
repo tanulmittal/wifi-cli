@@ -152,9 +152,35 @@ test('wpa_supplicant is detected for status/scan and writes fail before changing
     assert.equal(checks.find(c => c.name === 'connection')?.ok, true);
     await assert.rejects(linux.connect('Other', { password: 'secret' }), /Connecting needs NetworkManager/);
     assert.equal((await linux.list('wlp2s0'))[0].name, 'My Home');
-    await assert.rejects(linux.disconnect('wlp2s0'), /Disconnect needs NetworkManager/);
+    await assert.rejects(linux.disconnect('wlp2s0'), /requires root privileges/);
     await assert.rejects(linux.forget('My Home'), /Forget needs NetworkManager/);
-    await assert.rejects(linux.radio(false), /Changing radio power needs NetworkManager/);
+    await assert.rejects(linux.radio(false), /installed rfkill command/);
     assert.equal(calls.filter(([cmd]) => cmd !== 'which' && cmd !== 'wpa_cli').length, 0);
   } finally { setRunner(null); }
+});
+
+test('wpa_cli disconnect and rfkill radio control verify system replies', async () => {
+  const calls: string[] = [];
+  const getuid = process.getuid;
+  (process as any).getuid = () => 0;
+  let blocked = false;
+  setRunner(async (cmd, args) => {
+    calls.push(`${cmd} ${args.join(' ')}`);
+    if (cmd === 'which') {
+      if (['wpa_cli', 'rfkill'].includes(args[0])) return { stdout: args[0], stderr: '' };
+      throw new Error('missing');
+    }
+    if (cmd === 'wpa_cli' && args.includes('disconnect')) return { stdout: 'OK\n', stderr: '' };
+    if (cmd === 'rfkill' && args[0] === '--output') return { stdout: `ID TYPE DEVICE SOFT HARD\n0 wlan phy0 ${blocked ? 'blocked' : 'unblocked'} unblocked\n`, stderr: '' };
+    if (cmd === 'rfkill' && ['block', 'unblock'].includes(args[0])) { blocked = args[0] === 'block'; return { stdout: '', stderr: '' }; }
+    throw new Error(`Unexpected command: ${cmd}`);
+  });
+  try {
+    await linux.disconnect('wlp2s0');
+    await linux.radio(false);
+    await linux.radio(true);
+    assert.ok(calls.includes('wpa_cli -i wlp2s0 disconnect'));
+    assert.ok(calls.includes('rfkill block 0'));
+    assert.ok(calls.includes('rfkill unblock 0'));
+  } finally { setRunner(null); (process as any).getuid = getuid; }
 });

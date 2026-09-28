@@ -1,6 +1,6 @@
 import * as p from '@clack/prompts';
 import { adapter } from './adapters/index.js';
-import { isAuthError, sudoHint } from './util.js';
+import { isAuthError, sudoHint, which } from './util.js';
 import { backend, requireConnectBackend } from './adapters/linux.js';
 
 export async function confirmRemoteWifiSwitch(): Promise<boolean> {
@@ -12,18 +12,22 @@ export async function confirmRemoteWifiSwitch(): Promise<boolean> {
 export async function guided(rawArgv: string[]) {
   p.intro('openwifi — friendly WiFi manager');
   const ad: any = adapter();
-  const canManageProfiles = ad.kind !== 'linux' || await backend() === 'nmcli';
+  const linuxBackend = ad.kind === 'linux' ? await backend() : null;
+  const canEdit = linuxBackend === 'nmcli' || linuxBackend === 'wpa_cli' && await which('netplan');
+  const canDisconnect = linuxBackend === 'nmcli' || linuxBackend === 'wpa_cli';
+  const canToggle = ad.kind !== 'linux' || linuxBackend === 'nmcli' || linuxBackend === 'wpa_cli' && await which('rfkill');
   const action = await p.select({
     message: 'What do you want to do?',
     options: [
       { value: 'connect', label: 'Connect to WiFi' },
       { value: 'scan', label: 'Search networks' },
       { value: 'status', label: 'Show status' },
+      ...(canDisconnect ? [{ value: 'disconnect', label: 'Disconnect' }] : []),
       { value: 'list', label: 'Saved networks' },
       { value: 'forget', label: 'Forget / remove' },
-      ...(canManageProfiles ? [{ value: 'edit', label: 'Edit saved network' }] : []),
+      ...(canEdit ? [{ value: 'edit', label: 'Edit saved network' }] : []),
       { value: 'doctor', label: 'Troubleshoot' },
-      ...(canManageProfiles ? [{ value: 'toggle', label: 'Turn WiFi on/off' }] : []),
+      ...(canToggle ? [{ value: 'toggle', label: 'Turn WiFi on/off' }] : []),
     ],
   });
   if (p.isCancel(action)) { p.cancel('Bye.'); return; }
@@ -59,6 +63,10 @@ export async function guided(rawArgv: string[]) {
       }
     } else if (action === 'status') {
       console.log(JSON.stringify(await ad.status(), null, 2));
+    } else if (action === 'disconnect') {
+      if (ad.kind === 'linux' && !await confirmRemoteWifiSwitch()) { p.cancel('Kept the current connection.'); return; }
+      await ad.disconnect();
+      p.outro('Disconnected for now; the system may reconnect automatically.');
     } else if (action === 'list') {
       console.log(JSON.stringify(await ad.list(), null, 2));
     } else if (action === 'forget') {
@@ -81,6 +89,7 @@ export async function guided(rawArgv: string[]) {
       if (ad.kind === 'macos') { p.log.warn('macOS saved-password editing is unavailable. Use connect with a password instead.'); return; }
       const npw = await p.password({ message: 'New password (empty = keep)', mask: '•' });
       if (p.isCancel(npw)) { p.cancel('Bye.'); return; }
+      if (ad.kind === 'linux' && !await confirmRemoteWifiSwitch()) { p.cancel('Kept the current settings.'); return; }
       await ad.edit(String(sel), { newPassword: npw || undefined });
       p.outro('Saved.');
     } else if (action === 'doctor') {
@@ -90,6 +99,7 @@ export async function guided(rawArgv: string[]) {
     } else if (action === 'toggle') {
       const v = await p.select({ message: 'Radio', options: [{ value: 'on', label: 'Turn on' }, { value: 'off', label: 'Turn off' }] });
       if (p.isCancel(v)) { p.cancel('Bye.'); return; }
+      if (v === 'off' && ad.kind === 'linux' && !await confirmRemoteWifiSwitch()) { p.cancel('Kept WiFi on.'); return; }
       await ad.radio(v === 'on');
       p.outro(v === 'on' ? 'WiFi on.' : 'WiFi off.');
     }

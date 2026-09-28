@@ -53,7 +53,7 @@ export declare const linux: {
         bssid?: undefined;
         frequency?: undefined;
     }>;
-    disconnect(iface?: string): Promise<import("../util.js").RunResult>;
+    disconnect(iface?: string): Promise<import("../util.js").RunResult | undefined>;
     requireForget(name: string, iface?: string): Promise<string[] | undefined>;
     forget(name: string, iface?: string): Promise<void | import("../util.js").RunResult>;
     edit(name: string, o: {
@@ -61,8 +61,8 @@ export declare const linux: {
         autoconnect?: "on" | "off";
         priority?: number;
         rename?: string;
-    }): Promise<void>;
-    radio(on: boolean, iface?: string): Promise<import("../util.js").RunResult>;
+    }, iface?: string): Promise<void>;
+    radio(on: boolean, iface?: string): Promise<import("../util.js").RunResult | undefined>;
     doctor(iface?: string): Promise<{
         name: string;
         ok: boolean;
