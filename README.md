@@ -18,7 +18,7 @@ This installs directly from the public [GitHub repository](https://github.com/ta
 
 ## Commands
 
-- `openwifi` — guided menu (connect, search, status, saved, forget, edit, troubleshoot, on/off)
+- `openwifi` — guided menu (connect, search, status, saved, forget, troubleshoot; edit and on/off appear only where supported)
 - `openwifi scan [--interface NAME] [--json]` (macOS needs Location Services permission; guided connect offers manual SSID entry if unavailable)
 - `openwifi connect <SSID> [-p|--password] [--hidden] [--no-save]` (`--hidden` on Linux; `--no-save` currently reports unsupported before changing anything)
 - `openwifi list | status | disconnect` (+ `--json`)

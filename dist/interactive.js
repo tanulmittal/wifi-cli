@@ -11,6 +11,7 @@ export async function confirmRemoteWifiSwitch() {
 export async function guided(rawArgv) {
     p.intro('openwifi — friendly WiFi manager');
     const ad = adapter();
+    const canManageProfiles = ad.kind !== 'linux' || await backend() === 'nmcli';
     const action = await p.select({
         message: 'What do you want to do?',
         options: [
@@ -19,9 +20,9 @@ export async function guided(rawArgv) {
             { value: 'status', label: 'Show status' },
             { value: 'list', label: 'Saved networks' },
             { value: 'forget', label: 'Forget / remove' },
-            { value: 'edit', label: 'Edit saved network' },
+            ...(canManageProfiles ? [{ value: 'edit', label: 'Edit saved network' }] : []),
             { value: 'doctor', label: 'Troubleshoot' },
-            { value: 'toggle', label: 'Turn WiFi on/off' },
+            ...(canManageProfiles ? [{ value: 'toggle', label: 'Turn WiFi on/off' }] : []),
         ],
     });
     if (p.isCancel(action)) {
