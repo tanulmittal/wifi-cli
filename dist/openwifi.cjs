@@ -3965,26 +3965,37 @@ async function wpa(iface, command, arg) {
 function profilePath(iface, ssid) {
   return `${netplanDir}/90-openwifi-${iface}-${(0, import_node_crypto.createHash)("sha256").update(ssid).digest("hex").slice(0, 12)}.yaml`;
 }
-async function removableProfilePath(iface, ssid) {
-  const saved = profilePath(iface, ssid);
-  try {
-    await (0, import_promises.access)(saved);
-    return saved;
-  } catch {
+function trialName(saved, name) {
+  const stem = saved.slice(netplanDir.length + 1, -".yaml".length);
+  return name.startsWith(`${stem}.`) && /^\d+\.\d+\.yaml$/.test(name.slice(stem.length + 1));
+}
+async function trialCopies(saved) {
+  return (await (0, import_promises.readdir)(netplanDir)).filter((name) => trialName(saved, name)).map((name) => `${netplanDir}/${name}`);
+}
+async function removeNewTrialCopies(saved, content, previous) {
+  for (const path of await trialCopies(saved)) {
+    if (!previous.has(path) && await (0, import_promises.readFile)(path, "utf8") === content) await (0, import_promises.unlink)(path);
   }
+}
+async function removableProfilePaths(iface, ssid) {
   const escaped = ssid.replace(/[^\x00-\x7f]/gu, (character) => [...Buffer.from(character)].map((byte) => `\\x${byte.toString(16).padStart(2, "0")}`).join(""));
-  if (escaped === ssid) return null;
-  const legacy = profilePath(iface, escaped);
-  try {
-    const data = JSON.parse(await (0, import_promises.readFile)(legacy, "utf8"));
-    return Object.hasOwn(data?.network?.wifis?.[iface]?.["access-points"] ?? {}, escaped) ? legacy : null;
-  } catch {
-    return null;
+  const profiles = [ssid, ...escaped === ssid ? [] : [escaped]];
+  const paths = [];
+  for (const name of profiles) {
+    const saved = profilePath(iface, name);
+    for (const path of [saved, ...await trialCopies(saved)]) {
+      try {
+        const data = JSON.parse(await (0, import_promises.readFile)(path, "utf8"));
+        if (Object.hasOwn(data?.network?.wifis?.[iface]?.["access-points"] ?? {}, name)) paths.push(path);
+      } catch {
+      }
+    }
   }
+  return paths;
 }
 async function isOpenwifiProfile(ssid, iface) {
   try {
-    return !!await removableProfilePath(await wifiInterface(iface), ssid);
+    return (await removableProfilePaths(await wifiInterface(iface), ssid)).length > 0;
   } catch {
     return false;
   }
@@ -3992,8 +4003,8 @@ async function isOpenwifiProfile(ssid, iface) {
 async function requireNetplanForget(ssid, iface) {
   if (process.getuid?.() !== 0) throw new Error("Forgetting a Netplan network requires root privileges");
   const device = await wifiInterface(iface);
-  const saved = await removableProfilePath(device, ssid);
-  if (!saved) failClosed(`"${ssid}" is managed by existing Netplan configuration. openwifi can only forget networks it added; edit its /etc/netplan YAML from the physical console`);
+  const saved = await removableProfilePaths(device, ssid);
+  if (!saved.length) failClosed(`"${ssid}" is managed by existing Netplan configuration. openwifi can only forget networks it added; edit its /etc/netplan YAML from the physical console`);
   const status = await wpa(device, "status");
   if (status.split("\n").some((line) => line.startsWith("ssid=") && decodeWpaSsid(line.slice(5)) === ssid)) {
     failClosed(`"${ssid}" is the current connection. Connect to another network before forgetting it`);
@@ -4001,8 +4012,20 @@ async function requireNetplanForget(ssid, iface) {
   return saved;
 }
 async function forgetNetplan(ssid, iface) {
-  const saved = await requireNetplanForget(ssid, iface);
-  await (0, import_promises.unlink)(saved);
+  const device = await wifiInterface(iface);
+  for (const saved of await requireNetplanForget(ssid, device)) await (0, import_promises.unlink)(saved);
+  try {
+    const listed = await wpa(device, "list_networks");
+    for (const line of listed.split("\n")) {
+      const [id, rawSsid, , flags] = line.split("	");
+      if (/^\d+$/.test(id ?? "") && decodeWpaSsid(rawSsid ?? "") === ssid) {
+        if (flags?.includes("[CURRENT]")) throw new Error("the network became active");
+        if (!(await wpa(device, "remove_network", id)).endsWith("OK")) throw new Error("wpa_supplicant refused to remove the entry");
+      }
+    }
+  } catch (error) {
+    throw new Error(`Saved Netplan files were removed, but the runtime entry may remain: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 async function connectNetplan(ssid, options = {}) {
   if (!ssid || Buffer.byteLength(ssid, "utf8") > 32 || /[\0\n\r]/.test(ssid)) failClosed("WiFi name must be one non-empty line of at most 32 bytes");
@@ -4032,10 +4055,12 @@ async function connectNetplan(ssid, options = {}) {
   } catch (e2) {
     if (e2.code !== "ENOENT") throw e2;
   }
+  const candidateContent = netplanCandidate(iface, ssid, options.password, options.hidden);
+  const previous = new Set(await trialCopies(saved));
   const tempDir = await (0, import_promises.mkdtemp)("/run/openwifi-");
   const candidate = `${tempDir}/${filename}`;
   try {
-    await (0, import_promises.writeFile)(candidate, netplanCandidate(iface, ssid, options.password, options.hidden), { mode: 384, flag: "wx" });
+    await (0, import_promises.writeFile)(candidate, candidateContent, { mode: 384, flag: "wx" });
     await tryNetplanConnection(candidate, iface, ssid);
     try {
       await (0, import_promises.copyFile)(candidate, saved, import_node_fs.constants.COPYFILE_EXCL);
@@ -4043,7 +4068,11 @@ async function connectNetplan(ssid, options = {}) {
       throw new Error(`Connected to "${ssid}" but could not save it for reboot: ${error instanceof Error ? error.message : String(error)}`);
     }
   } finally {
-    await (0, import_promises.rm)(tempDir, { recursive: true, force: true });
+    try {
+      await removeNewTrialCopies(saved, candidateContent, previous);
+    } finally {
+      await (0, import_promises.rm)(tempDir, { recursive: true, force: true });
+    }
   }
 }
 
@@ -4210,7 +4239,7 @@ var linux = {
       const connected = await linux.status(iface).then((s) => "state" in s && s.state === "COMPLETED").catch(() => false);
       checks.push({ name: "connection", ok: connected, hint: connected ? "WiFi is connected through wpa_supplicant." : "Could not confirm WiFi status. Try: sudo openwifi doctor --interface <WiFi interface>" });
       const hasNetplan = await which("netplan");
-      checks.push({ name: "note", ok: hasNetplan, hint: hasNetplan ? "Netplan connection trials are available with sudo and physical console backup. Edit/forget still need NetworkManager." : "Scan/status supported. Connecting needs Netplan or NetworkManager." });
+      checks.push({ name: "note", ok: hasNetplan, hint: hasNetplan ? "Netplan can trial new networks with sudo and physical console access. Forget supports inactive openwifi-created profiles; edit needs NetworkManager." : "Scan/status supported. Connecting needs Netplan or NetworkManager." });
     }
     return checks;
   }
@@ -4492,7 +4521,7 @@ async function upgradeFromGithub() {
 
 // src/cli.ts
 var program2 = new Command();
-program2.name("openwifi").description("Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.").version("0.2.0-beta.3").option("--interface <name>", "WiFi interface (e.g. wlan0, en0)").option("--timeout <sec>", "command timeout in seconds", "25").option("--json", "machine-readable JSON output").option("--yes", "skip confirmations (scripts)");
+program2.name("openwifi").description("Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.").version("0.2.0-beta.4").option("--interface <name>", "WiFi interface (e.g. wlan0, en0)").option("--timeout <sec>", "command timeout in seconds", "25").option("--json", "machine-readable JSON output").option("--yes", "skip confirmations (scripts)");
 var tmo = () => {
   const seconds = Number(program2.opts().timeout ?? 25);
   if (!Number.isFinite(seconds) || seconds <= 0) throw new Error("--timeout must be a positive number of seconds");

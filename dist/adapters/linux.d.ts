@@ -54,7 +54,7 @@ export declare const linux: {
         frequency?: undefined;
     }>;
     disconnect(iface?: string): Promise<import("../util.js").RunResult>;
-    requireForget(name: string, iface?: string): Promise<string | undefined>;
+    requireForget(name: string, iface?: string): Promise<string[] | undefined>;
     forget(name: string, iface?: string): Promise<void | import("../util.js").RunResult>;
     edit(name: string, o: {
         newPassword?: string;

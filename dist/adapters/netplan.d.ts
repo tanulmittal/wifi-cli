@@ -8,8 +8,9 @@ export declare function parseWpaNetworks(text: string): {
     ssid: string;
 }[];
 export declare function tryNetplanConnection(candidate: string, iface: string, ssid: string): Promise<void>;
+export declare function removeNewTrialCopies(saved: string, content: string, previous: Set<string>): Promise<void>;
 export declare function isOpenwifiProfile(ssid: string, iface?: string): Promise<boolean>;
-export declare function requireNetplanForget(ssid: string, iface?: string): Promise<string>;
+export declare function requireNetplanForget(ssid: string, iface?: string): Promise<string[]>;
 export declare function forgetNetplan(ssid: string, iface?: string): Promise<void>;
 export declare function connectNetplan(ssid: string, options?: {
     password?: string;

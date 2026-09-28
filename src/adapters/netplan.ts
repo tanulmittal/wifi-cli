@@ -92,28 +92,47 @@ function profilePath(iface: string, ssid: string): string {
   return `${netplanDir}/90-openwifi-${iface}-${createHash('sha256').update(ssid).digest('hex').slice(0, 12)}.yaml`;
 }
 
-async function removableProfilePath(iface: string, ssid: string): Promise<string | null> {
-  const saved = profilePath(iface, ssid);
-  try { await access(saved); return saved; } catch { /* Check beta.1's escaped-SSID format. */ }
+function trialName(saved: string, name: string): boolean {
+  const stem = saved.slice(netplanDir.length + 1, -'.yaml'.length);
+  return name.startsWith(`${stem}.`) && /^\d+\.\d+\.yaml$/.test(name.slice(stem.length + 1));
+}
+
+async function trialCopies(saved: string): Promise<string[]> {
+  return (await readdir(netplanDir)).filter(name => trialName(saved, name)).map(name => `${netplanDir}/${name}`);
+}
+
+export async function removeNewTrialCopies(saved: string, content: string, previous: Set<string>): Promise<void> {
+  for (const path of await trialCopies(saved)) {
+    if (!previous.has(path) && await readFile(path, 'utf8') === content) await unlink(path);
+  }
+}
+
+async function removableProfilePaths(iface: string, ssid: string): Promise<string[]> {
   const escaped = ssid.replace(/[^\x00-\x7f]/gu, character => [...Buffer.from(character)].map(byte => `\\x${byte.toString(16).padStart(2, '0')}`).join(''));
-  if (escaped === ssid) return null;
-  const legacy = profilePath(iface, escaped);
-  try {
-    const data = JSON.parse(await readFile(legacy, 'utf8'));
-    return Object.hasOwn(data?.network?.wifis?.[iface]?.['access-points'] ?? {}, escaped) ? legacy : null;
-  } catch { return null; }
+  const profiles = [ssid, ...(escaped === ssid ? [] : [escaped])];
+  const paths: string[] = [];
+  for (const name of profiles) {
+    const saved = profilePath(iface, name);
+    for (const path of [saved, ...await trialCopies(saved)]) {
+      try {
+        const data = JSON.parse(await readFile(path, 'utf8'));
+        if (Object.hasOwn(data?.network?.wifis?.[iface]?.['access-points'] ?? {}, name)) paths.push(path);
+      } catch { /* Ignore unrelated or unreadable files. */ }
+    }
+  }
+  return paths;
 }
 
 export async function isOpenwifiProfile(ssid: string, iface?: string): Promise<boolean> {
-  try { return !!await removableProfilePath(await wifiInterface(iface), ssid); }
+  try { return (await removableProfilePaths(await wifiInterface(iface), ssid)).length > 0; }
   catch { return false; }
 }
 
-export async function requireNetplanForget(ssid: string, iface?: string): Promise<string> {
+export async function requireNetplanForget(ssid: string, iface?: string): Promise<string[]> {
   if (process.getuid?.() !== 0) throw new Error('Forgetting a Netplan network requires root privileges');
   const device = await wifiInterface(iface);
-  const saved = await removableProfilePath(device, ssid);
-  if (!saved) failClosed(`"${ssid}" is managed by existing Netplan configuration. openwifi can only forget networks it added; edit its /etc/netplan YAML from the physical console`);
+  const saved = await removableProfilePaths(device, ssid);
+  if (!saved.length) failClosed(`"${ssid}" is managed by existing Netplan configuration. openwifi can only forget networks it added; edit its /etc/netplan YAML from the physical console`);
   const status = await wpa(device, 'status');
   if (status.split('\n').some(line => line.startsWith('ssid=') && decodeWpaSsid(line.slice(5)) === ssid)) {
     failClosed(`"${ssid}" is the current connection. Connect to another network before forgetting it`);
@@ -122,8 +141,20 @@ export async function requireNetplanForget(ssid: string, iface?: string): Promis
 }
 
 export async function forgetNetplan(ssid: string, iface?: string): Promise<void> {
-  const saved = await requireNetplanForget(ssid, iface);
-  await unlink(saved);
+  const device = await wifiInterface(iface);
+  for (const saved of await requireNetplanForget(ssid, device)) await unlink(saved);
+  try {
+    const listed = await wpa(device, 'list_networks');
+    for (const line of listed.split('\n')) {
+      const [id, rawSsid, , flags] = line.split('\t');
+      if (/^\d+$/.test(id ?? '') && decodeWpaSsid(rawSsid ?? '') === ssid) {
+        if (flags?.includes('[CURRENT]')) throw new Error('the network became active');
+        if (!(await wpa(device, 'remove_network', id)).endsWith('OK')) throw new Error('wpa_supplicant refused to remove the entry');
+      }
+    }
+  } catch (error) {
+    throw new Error(`Saved Netplan files were removed, but the runtime entry may remain: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 export async function connectNetplan(ssid: string, options: { password?: string; hidden?: boolean; iface?: string; save?: boolean } = {}): Promise<void> {
@@ -153,14 +184,17 @@ export async function connectNetplan(ssid: string, options: { password?: string;
   try { await access(saved); failClosed(`A profile for "${ssid}" already exists; edit the saved network instead`); }
   catch (e: any) { if (e.code !== 'ENOENT') throw e; }
 
+  const candidateContent = netplanCandidate(iface, ssid, options.password, options.hidden);
+  const previous = new Set(await trialCopies(saved));
   const tempDir = await mkdtemp('/run/openwifi-');
   const candidate = `${tempDir}/${filename}`;
   try {
-    await writeFile(candidate, netplanCandidate(iface, ssid, options.password, options.hidden), { mode: 0o600, flag: 'wx' });
+    await writeFile(candidate, candidateContent, { mode: 0o600, flag: 'wx' });
     await tryNetplanConnection(candidate, iface, ssid);
     try { await copyFile(candidate, saved, constants.COPYFILE_EXCL); }
     catch (error) { throw new Error(`Connected to "${ssid}" but could not save it for reboot: ${error instanceof Error ? error.message : String(error)}`); }
   } finally {
-    await rm(tempDir, { recursive: true, force: true });
+    try { await removeNewTrialCopies(saved, candidateContent, previous); }
+    finally { await rm(tempDir, { recursive: true, force: true }); }
   }
 }

@@ -6,7 +6,7 @@ import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
-import { connectNetplan, forgetNetplan, isOpenwifiProfile, netplanCandidate, parseWpaNetworks, requireNetplanForget, setNetplanDirForTests, setTrialStarter, tryNetplanConnection } from '../src/adapters/netplan.js';
+import { connectNetplan, forgetNetplan, isOpenwifiProfile, netplanCandidate, parseWpaNetworks, removeNewTrialCopies, requireNetplanForget, setNetplanDirForTests, setTrialStarter, tryNetplanConnection } from '../src/adapters/netplan.js';
 import { setRunner } from '../src/util.js';
 
 test('Netplan candidate contains one target AP and WPA credentials in system format', () => {
@@ -64,11 +64,13 @@ test('Netplan forget removes only an openwifi-owned inactive profile', async () 
   let current = 'Current WiFi';
   setRunner(async (cmd, args) => {
     if (cmd === 'wpa_cli' && args.includes('status')) return { stdout: `wpa_state=COMPLETED\nssid=${current}\n`, stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('list_networks')) return { stdout: 'network id / ssid / bssid / flags\n0\tOld WiFi\tany\t[DISABLED]\n1\tCurrent WiFi\tany\t[CURRENT]\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('remove_network')) return { stdout: 'OK\n', stderr: '' };
     throw new Error('Unexpected command');
   });
   try {
     await assert.rejects(requireNetplanForget('Unmanaged', 'wlp2s0'), /only forget networks it added/);
-    await writeFile(file, 'test', { mode: 0o600 });
+    await writeFile(file, netplanCandidate('wlp2s0', ssid, 'secret123'), { mode: 0o600 });
     current = ssid;
     await assert.rejects(forgetNetplan(ssid, 'wlp2s0'), /current connection/);
     await access(file);
@@ -106,22 +108,49 @@ test('Netplan forget recognizes and removes a beta.1 escaped-SSID profile', asyn
   const ssid = 'Tanul’s iPhone';
   const escaped = 'Tanul\\xe2\\x80\\x99s iPhone';
   const file = join(dir, `90-openwifi-wlp2s0-${createHash('sha256').update(escaped).digest('hex').slice(0, 12)}.yaml`);
+  const stamped = file.replace(/\.yaml$/, '.1790580022.1488316.yaml');
   const getuid = process.getuid;
   (process as any).getuid = () => 0;
   setNetplanDirForTests(dir);
   setRunner(async (cmd, args) => {
     if (cmd === 'wpa_cli' && args.includes('status')) return { stdout: 'wpa_state=COMPLETED\nssid=Airtel_tanu_0405\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('list_networks')) return { stdout: 'network id / ssid / bssid / flags\n0\tTanul\\xe2\\x80\\x99s iPhone\tany\t[DISABLED]\n1\tAirtel_tanu_0405\tany\t[CURRENT]\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('remove_network')) { assert.equal(args.at(-1), '0'); return { stdout: 'OK\n', stderr: '' }; }
     throw new Error('Unexpected command');
   });
   try {
     await writeFile(file, netplanCandidate('wlp2s0', escaped, 'secret123'), { mode: 0o600 });
+    await writeFile(stamped, netplanCandidate('wlp2s0', escaped, 'secret123'), { mode: 0o600 });
     assert.equal(await isOpenwifiProfile(ssid, 'wlp2s0'), true);
     await forgetNetplan(ssid, 'wlp2s0');
     await assert.rejects(access(file), { code: 'ENOENT' });
+    await assert.rejects(access(stamped), { code: 'ENOENT' });
+    await writeFile(stamped, netplanCandidate('wlp2s0', escaped, 'secret123'), { mode: 0o600 });
+    assert.equal(await isOpenwifiProfile(ssid, 'wlp2s0'), true);
+    await forgetNetplan(ssid, 'wlp2s0');
+    await assert.rejects(access(stamped), { code: 'ENOENT' });
   } finally {
     setRunner(null);
     setNetplanDirForTests(null);
     (process as any).getuid = getuid;
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('Netplan trial cleanup removes only newly generated matching timestamp YAML', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openwifi-trial-test-'));
+  const saved = join(dir, '90-openwifi-wlp2s0-abc123.yaml');
+  const old = saved.replace(/\.yaml$/, '.1790580000.100.yaml');
+  const created = saved.replace(/\.yaml$/, '.1790580001.200.yaml');
+  const unrelated = saved.replace(/\.yaml$/, '.1790580002.300.yaml');
+  setNetplanDirForTests(dir);
+  try {
+    await writeFile(old, 'candidate', { mode: 0o600 });
+    await writeFile(created, 'candidate', { mode: 0o600 });
+    await writeFile(unrelated, 'different', { mode: 0o600 });
+    await removeNewTrialCopies(saved, 'candidate', new Set([old]));
+    await access(old);
+    await access(unrelated);
+    await assert.rejects(access(created), { code: 'ENOENT' });
+  } finally { setNetplanDirForTests(null); await rm(dir, { recursive: true, force: true }); }
 });
