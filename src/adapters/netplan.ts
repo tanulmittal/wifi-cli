@@ -1,15 +1,18 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { access, copyFile, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdtemp, readdir, rm, unlink, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { run, failClosed } from '../util.js';
+import { decodeWpaSsid, validWpaSsid } from './wpa.js';
 
 let startTrial = (args: string[]): ChildProcess => spawn('netplan', args, { stdio: ['pipe', 'ignore', 'ignore'] });
+let netplanDir = '/etc/netplan';
 // Test hook: network-changing trials are never run in the test process.
 export function setTrialStarter(start: typeof startTrial | null) {
   startTrial = start ?? ((args) => spawn('netplan', args, { stdio: ['pipe', 'ignore', 'ignore'] }));
 }
+export function setNetplanDirForTests(dir: string | null) { netplanDir = dir ?? '/etc/netplan'; }
 
 export function netplanCandidate(iface: string, ssid: string, password?: string, hidden = false): string {
   const profile = password ? { password, ...(hidden ? { hidden: true } : {}) } : hidden ? { hidden: true } : {};
@@ -19,7 +22,8 @@ export function netplanCandidate(iface: string, ssid: string, password?: string,
 export function parseWpaNetworks(text: string): { id: string; ssid: string }[] {
   return text.split('\n').map(line => {
     const [id, ssid] = line.replace(/\r$/, '').split('\t');
-    return /^\d+$/.test(id ?? '') && ssid ? { id, ssid } : null;
+    const decoded = decodeWpaSsid(ssid ?? '');
+    return /^\d+$/.test(id ?? '') && validWpaSsid(decoded) ? { id, ssid: decoded } : null;
   }).filter((item): item is { id: string; ssid: string } => item !== null);
 }
 
@@ -42,16 +46,22 @@ export async function tryNetplanConnection(candidate: string, iface: string, ssi
     if (!(await wpa(iface, 'select_network', networkId)).endsWith('OK')) throw new Error(`Could not select "${ssid}". The trial will be rolled back.`);
 
     let connected = false;
+    let verifiedTwice = false;
     for (let attempt = 0; attempt < 45 && !ended; attempt++) {
       await delay(1000);
       const status = await wpa(iface, 'status').catch(() => '');
-      if (status.includes('wpa_state=COMPLETED') && status.split('\n').includes(`ssid=${ssid}`)) {
+      if (status.includes('wpa_state=COMPLETED') && status.split('\n').some(line => line.startsWith('ssid=') && decodeWpaSsid(line.slice(5)) === ssid)) {
         const address = await run('ip', ['-4', '-o', 'addr', 'show', 'dev', iface]).then(r => r.stdout).catch(() => '');
-        if (/\binet\s+\d/.test(address)) { connected = true; break; }
+        if (/\binet\s+\d/.test(address)) {
+          if (verifiedTwice) { connected = true; break; }
+          verifiedTwice = true;
+          continue;
+        }
       }
+      verifiedTwice = false;
     }
     if (!connected) throw new Error(`Could not confirm "${ssid}" with an IP address. The trial will be rolled back.`);
-    trial.kill('SIGUSR1');
+    if (!trial.kill('SIGUSR1')) throw new Error('Netplan trial exited before confirmation; nothing was saved.');
     const result = await exited;
     if (result !== 0) throw new Error('Netplan did not confirm the connection; nothing was saved.');
   } catch (e) {
@@ -78,6 +88,33 @@ async function wpa(iface: string, command: string, arg?: string): Promise<string
   return stdout.trim();
 }
 
+function profilePath(iface: string, ssid: string): string {
+  return `${netplanDir}/90-openwifi-${iface}-${createHash('sha256').update(ssid).digest('hex').slice(0, 12)}.yaml`;
+}
+
+export async function isOpenwifiProfile(ssid: string, iface?: string): Promise<boolean> {
+  try { await access(profilePath(await wifiInterface(iface), ssid)); return true; }
+  catch { return false; }
+}
+
+export async function requireNetplanForget(ssid: string, iface?: string): Promise<string> {
+  if (process.getuid?.() !== 0) throw new Error('Forgetting a Netplan network requires root privileges');
+  const device = await wifiInterface(iface);
+  const saved = profilePath(device, ssid);
+  try { await access(saved); }
+  catch { failClosed(`"${ssid}" is managed by existing Netplan configuration. openwifi can only forget networks it added; edit its /etc/netplan YAML from the physical console`); }
+  const status = await wpa(device, 'status');
+  if (status.split('\n').some(line => line.startsWith('ssid=') && decodeWpaSsid(line.slice(5)) === ssid)) {
+    failClosed(`"${ssid}" is the current connection. Connect to another network before forgetting it`);
+  }
+  return saved;
+}
+
+export async function forgetNetplan(ssid: string, iface?: string): Promise<void> {
+  const saved = await requireNetplanForget(ssid, iface);
+  await unlink(saved);
+}
+
 export async function connectNetplan(ssid: string, options: { password?: string; hidden?: boolean; iface?: string; save?: boolean } = {}): Promise<void> {
   if (!ssid || Buffer.byteLength(ssid, 'utf8') > 32 || /[\0\n\r]/.test(ssid)) failClosed('WiFi name must be one non-empty line of at most 32 bytes');
   if (options.password && (options.password.length < 8 || options.password.length > 63 || /[\x00-\x1f\x7f]/.test(options.password))) failClosed('WPA password must be 8–63 printable characters');
@@ -89,15 +126,15 @@ export async function connectNetplan(ssid: string, options: { password?: string;
   if (!configured.trim() || configured.trim() === 'null') failClosed(`${iface} is not configured by Netplan`);
   const current = await wpa(iface, 'status');
   if (!current.includes('wpa_state=COMPLETED')) failClosed('Current WiFi is not connected; use the system console to repair it first');
-  if (current.split('\n').includes(`ssid=${ssid}`)) return;
+  if (current.split('\n').some(line => line.startsWith('ssid=') && decodeWpaSsid(line.slice(5)) === ssid)) return;
   const scans = await wpa(iface, 'scan_results').catch(() => '');
-  const match = scans.split('\n').slice(1).map(line => line.split('\t')).find(fields => fields.slice(4).join('\t') === ssid);
+  const match = scans.split('\n').slice(1).map(line => line.split('\t')).find(fields => decodeWpaSsid(fields.slice(4).join('\t')) === ssid);
   const flags = match?.[3] ?? '';
   if (/EAP|802\.1X/i.test(flags) || (/SAE/i.test(flags) && !/PSK/i.test(flags))) failClosed('Enterprise and WPA3-only networks need a separate authentication setup');
   if (/WPA|RSN/i.test(flags) && !options.password) failClosed(`"${ssid}" needs a password`);
 
-  const filename = `90-openwifi-${iface}-${createHash('sha256').update(ssid).digest('hex').slice(0, 12)}.yaml`;
-  const saved = `/etc/netplan/${filename}`;
+  const saved = profilePath(iface, ssid);
+  const filename = saved.slice(netplanDir.length + 1);
   try { await access(saved); failClosed(`A profile for "${ssid}" already exists; edit the saved network instead`); }
   catch (e: any) { if (e.code !== 'ENOENT') throw e; }
 

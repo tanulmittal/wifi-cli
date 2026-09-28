@@ -1,6 +1,7 @@
 import { run, which, failClosed } from '../util.js';
 import { setTimeout as delay } from 'node:timers/promises';
-import { connectNetplan, parseWpaNetworks } from './netplan.js';
+import { connectNetplan, forgetNetplan, isOpenwifiProfile, parseWpaNetworks, requireNetplanForget } from './netplan.js';
+import { decodeWpaSsid, validWpaSsid } from './wpa.js';
 export async function backend() {
     if (await which('nmcli'))
         return 'nmcli';
@@ -45,8 +46,8 @@ export function parseIwNetworks(t) {
 export function parseWpaResults(t) {
     return t.split('\n').slice(1).map(line => {
         const [bssid, freq, level, flags, ...ssidParts] = line.replace(/\r$/, '').split('\t');
-        const ssid = ssidParts.join('\t');
-        if (!ssid || !bssid || !Number.isFinite(Number(level)))
+        const ssid = decodeWpaSsid(ssidParts.join('\t'));
+        if (!validWpaSsid(ssid) || !bssid || !Number.isFinite(Number(level)))
             return null;
         const signal = Math.max(0, Math.min(100, 2 * (Number(level) + 100)));
         return { ssid, signal, security: flags || 'open', bssid, freq };
@@ -96,7 +97,7 @@ export const linux = {
     async list(iface) {
         if (await backend() === 'wpa_cli') {
             const { stdout } = await run('wpa_cli', wpaArgs(iface, 'list_networks'));
-            return parseWpaNetworks(stdout).map(n => ({ name: n.ssid, type: 'wpa_supplicant' }));
+            return Promise.all(parseWpaNetworks(stdout).map(async (n) => ({ name: n.ssid, type: await isOpenwifiProfile(n.ssid, iface) ? 'openwifi-netplan' : 'wpa_supplicant' })));
         }
         await requireNmcli('Listing saved networks');
         const { stdout } = await run('nmcli', ['-t', '-f', 'NAME,UUID,TYPE', 'connection', 'show']);
@@ -117,7 +118,7 @@ export const linux = {
             const values = Object.fromEntries(stdout.split('\n').map(line => line.split(/=(.*)/s).slice(0, 2)).filter(pair => pair.length === 2));
             if (!values.wpa_state)
                 throw new Error('Could not read wpa_supplicant status. Try: sudo openwifi status --interface <WiFi interface>');
-            return { backend: 'wpa_cli', state: values.wpa_state, ssid: values.ssid ?? '', bssid: values.bssid ?? '', frequency: values.freq ?? '' };
+            return { backend: 'wpa_cli', state: values.wpa_state, ssid: decodeWpaSsid(values.ssid ?? ''), bssid: values.bssid ?? '', frequency: values.freq ?? '' };
         }
         if (b === 'none')
             failClosed('No Linux WiFi backend found (install NetworkManager or iwd)');
@@ -137,7 +138,17 @@ export const linux = {
             failClosed('No WiFi device found');
         return run('nmcli', ['device', 'disconnect', wifi]);
     },
-    async forget(name) { await requireNmcli('Forget'); return run('nmcli', ['connection', 'delete', 'id', name]); },
+    async requireForget(name, iface) {
+        if (await backend() === 'wpa_cli' && await which('netplan'))
+            return requireNetplanForget(name, iface);
+        await requireNmcli('Forget');
+    },
+    async forget(name, iface) {
+        if (await backend() === 'wpa_cli' && await which('netplan'))
+            return forgetNetplan(name, iface);
+        await requireNmcli('Forget');
+        return run('nmcli', ['connection', 'delete', 'id', name]);
+    },
     async edit(name, o) {
         if (await backend() !== 'nmcli')
             failClosed('Edit needs NetworkManager (nmcli)');

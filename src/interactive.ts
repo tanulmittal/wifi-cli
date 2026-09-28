@@ -61,14 +61,16 @@ export async function guided(rawArgv: string[]) {
     } else if (action === 'list') {
       console.log(JSON.stringify(await ad.list(), null, 2));
     } else if (action === 'forget') {
-      const saved: any[] = await ad.list().catch(() => []);
-      if (!saved.length) { p.note('No saved networks found.'); p.outro('Done.'); return; }
+      const all: any[] = await ad.list();
+      const saved = ad.kind === 'linux' && await backend() === 'wpa_cli' ? all.filter(s => s.type === 'openwifi-netplan') : all;
+      if (!saved.length) { p.note(ad.kind === 'linux' && await backend() === 'wpa_cli' ? 'No removable openwifi networks found. Existing Netplan profiles must be edited from the physical console.' : 'No saved networks found.'); p.outro('Done.'); return; }
       const sel = await p.select({ message: 'Forget which?', options: saved.map(s => ({ value: s.name, label: s.name })) });
       if (p.isCancel(sel)) { p.cancel('Bye.'); return; }
+      if (ad.kind === 'linux') await ad.requireForget(String(sel));
       const ok = await p.confirm({ message: `Forget "${sel}"? You will need the password to rejoin.` });
       if (p.isCancel(ok) || !ok) { p.cancel('Kept.'); return; }
       await ad.forget(String(sel));
-      p.outro(`Forgot "${sel}".`);
+      p.outro(ad.kind === 'linux' && await backend() === 'wpa_cli' ? `Removed "${sel}" from saved Netplan configuration. It may remain available until network reconfiguration or reboot.` : `Forgot "${sel}".`);
     } else if (action === 'edit') {
       const saved: any[] = await ad.list().catch(() => []);
       const sel = saved.length

@@ -11,7 +11,7 @@ const program = new Command();
 program
   .name('openwifi')
   .description('Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.')
-  .version('0.2.0-beta.1')
+  .version('0.2.0-beta.2')
   .option('--interface <name>', 'WiFi interface (e.g. wlan0, en0)')
   .option('--timeout <sec>', 'command timeout in seconds', '25')
   .option('--json', 'machine-readable JSON output')
@@ -89,13 +89,17 @@ program.command('disconnect')
 
 const forget = async (profile: string) => {
   try {
+    const ad: any = adapter();
+    if (process.platform === 'linux') await ad.requireForget(profile, program.opts().interface);
     if (!program.opts().yes && !process.stdin.isTTY) throw new Error('Forgetting a network needs confirmation; run interactively or pass --yes.');
     if (!program.opts().yes) {
       const ok = await p.confirm({ message: `Forget "${profile}"? You will need the password to rejoin.` });
       if (p.isCancel(ok) || !ok) { console.log('Kept.'); return; }
     }
-    const ad: any = adapter(); await ad.forget(profile, program.opts().interface);
-    if (program.opts().json) printJson({ ok: true, forgot: profile }); else console.log(`Forgot "${profile}".`);
+    await ad.forget(profile, program.opts().interface);
+    const netplan = process.platform === 'linux' && await backend() === 'wpa_cli';
+    if (program.opts().json) printJson({ ok: true, forgot: profile, ...(netplan ? { pendingReconfigure: true } : {}) });
+    else console.log(netplan ? `Removed "${profile}" from saved Netplan configuration. It may remain available until network reconfiguration or reboot.` : `Forgot "${profile}".`);
   } catch (e) { handleErr(e, raw(['forget', profile])); }
 };
 program.command('forget <profile>').description('Forget / remove a saved network').action(forget);

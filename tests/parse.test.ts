@@ -28,6 +28,11 @@ test('wpa scan results keep SSIDs with spaces and security flags', () => {
   assert.deepEqual(nets, [{ ssid: 'My Home WiFi', signal: 90, security: '[WPA2-PSK-CCMP][ESS]', bssid: 'aa:bb:cc:dd:ee:ff', freq: '2412' }]);
 });
 
+test('wpa scan decodes UTF-8 SSIDs and hides invalid all-NUL entries', () => {
+  const nets = parseWpaResults('bssid / frequency / signal level / flags / ssid\naa:bb:cc:dd:ee:ff\t2412\t-55\t[WPA2-PSK]\tTanul\\xe2\\x80\\x99s iPhone\naa:bb:cc:dd:ee:00\t2412\t-90\t[WPA2-PSK]\t\\x00\\x00\n');
+  assert.deepEqual(nets.map(n => n.ssid), ['Tanul’s iPhone']);
+});
+
 test('redact + auth detection + sudo hint', () => {
   assert.match(redact('connect --password secret123'), /\*\*\*/);
   assert.equal(isAuthError(new Error('Not authorized')), true);

@@ -1,14 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
-import { netplanCandidate, parseWpaNetworks, setTrialStarter, tryNetplanConnection } from '../src/adapters/netplan.js';
+import { forgetNetplan, netplanCandidate, parseWpaNetworks, requireNetplanForget, setNetplanDirForTests, setTrialStarter, tryNetplanConnection } from '../src/adapters/netplan.js';
 import { setRunner } from '../src/util.js';
 
 test('Netplan candidate contains one target AP and WPA credentials in system format', () => {
   const candidate = JSON.parse(netplanCandidate('wlp2s0', "Tanul's iPhone", 'secret123', true));
   assert.deepEqual(candidate, { network: { version: 2, wifis: { wlp2s0: { 'access-points': { "Tanul's iPhone": { password: 'secret123', hidden: true } } } } } });
-  assert.deepEqual(parseWpaNetworks('network id / ssid / bssid / flags\n0\tCurrent\tany\t[CURRENT]\n1\tNew WiFi\tany\t\n'), [{ id: '0', ssid: 'Current' }, { id: '1', ssid: 'New WiFi' }]);
+  assert.deepEqual(parseWpaNetworks('network id / ssid / bssid / flags\n0\tCurrent\tany\t[CURRENT]\n1\tNew WiFi\tany\t\n2\tTanul\\xe2\\x80\\x99s iPhone\tany\t\n3\t\\x00\\x00\tany\t\n'), [{ id: '0', ssid: 'Current' }, { id: '1', ssid: 'New WiFi' }, { id: '2', ssid: 'Tanul’s iPhone' }]);
 });
 
 test('Netplan trial selects the target only after rollback is armed and confirms on connection', async () => {
@@ -47,4 +51,33 @@ test('Netplan trial rejects and leaves current profile untouched if selection fa
     await assert.rejects(tryNetplanConnection('/run/openwifi-test/candidate.yaml', 'wlp2s0', 'New WiFi'), /Could not select/);
     assert.deepEqual(signals, ['SIGINT']);
   } finally { setRunner(null); setTrialStarter(null); }
+});
+
+test('Netplan forget removes only an openwifi-owned inactive profile', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openwifi-test-'));
+  const ssid = 'Old WiFi';
+  const file = join(dir, `90-openwifi-wlp2s0-${createHash('sha256').update(ssid).digest('hex').slice(0, 12)}.yaml`);
+  const getuid = process.getuid;
+  setNetplanDirForTests(dir);
+  (process as any).getuid = () => 0;
+  let current = 'Current WiFi';
+  setRunner(async (cmd, args) => {
+    if (cmd === 'wpa_cli' && args.includes('status')) return { stdout: `wpa_state=COMPLETED\nssid=${current}\n`, stderr: '' };
+    throw new Error('Unexpected command');
+  });
+  try {
+    await assert.rejects(requireNetplanForget('Unmanaged', 'wlp2s0'), /only forget networks it added/);
+    await writeFile(file, 'test', { mode: 0o600 });
+    current = ssid;
+    await assert.rejects(forgetNetplan(ssid, 'wlp2s0'), /current connection/);
+    await access(file);
+    current = 'Current WiFi';
+    await forgetNetplan(ssid, 'wlp2s0');
+    await assert.rejects(access(file), { code: 'ENOENT' });
+  } finally {
+    setRunner(null);
+    setNetplanDirForTests(null);
+    (process as any).getuid = getuid;
+    await rm(dir, { recursive: true, force: true });
+  }
 });

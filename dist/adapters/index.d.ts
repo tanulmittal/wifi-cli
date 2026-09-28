@@ -21,7 +21,7 @@ export declare function adapter(): {
     } | {
         backend: "wpa_cli";
         state: any;
-        ssid: any;
+        ssid: string;
         bssid: any;
         frequency: any;
         detail?: undefined;
@@ -38,7 +38,8 @@ export declare function adapter(): {
         frequency?: undefined;
     }>;
     disconnect(iface?: string): Promise<import("../util.js").RunResult>;
-    forget(name: string): Promise<import("../util.js").RunResult>;
+    requireForget(name: string, iface?: string): Promise<string | undefined>;
+    forget(name: string, iface?: string): Promise<void | import("../util.js").RunResult>;
     edit(name: string, o: {
         newPassword?: string;
         autoconnect?: "on" | "off";
