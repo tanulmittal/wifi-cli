@@ -159,6 +159,18 @@ test('wpa_supplicant is detected for status/scan and writes fail before changing
   } finally { setRunner(null); }
 });
 
+test('doctor describes Netplan editing on wpa_supplicant hosts', async () => {
+  setRunner(async (cmd, args) => {
+    if (cmd === 'which' && ['wpa_cli', 'netplan'].includes(args[0])) return { stdout: `/usr/sbin/${args[0]}`, stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('status')) return { stdout: 'wpa_state=COMPLETED\nssid=Example\n', stderr: '' };
+    throw new Error('unexpected command');
+  });
+  try {
+    const checks = await linux.doctor('wlp2s0');
+    assert.match(checks.find(c => c.name === 'note')?.hint ?? '', /Edit supports password and SSID changes/);
+  } finally { setRunner(null); }
+});
+
 test('wpa_cli disconnect and rfkill radio control verify system replies', async () => {
   const calls: string[] = [];
   const getuid = process.getuid;

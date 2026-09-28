@@ -10,6 +10,9 @@ test('Git installs use the committed bundle without npm preparation', () => {
     assert.equal(pkg.scripts?.[name], undefined, `${name} triggers Git dependency preparation`);
   }
   assert.equal(pkg.bin.openwifi, './dist/openwifi.cjs');
+  const bundle = readFileSync(new URL('../dist/openwifi.cjs', import.meta.url), 'utf8');
+  assert.ok(bundle.includes(pkg.version), 'committed bundle must match package version');
+  assert.ok(bundle.includes('Netplan has no per-profile autoconnect or priority setting'), 'committed bundle must include Netplan editing');
 });
 
 test('upgrade installs the GitHub package globally with durable links', async () => {

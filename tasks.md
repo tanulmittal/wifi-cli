@@ -8,5 +8,7 @@
 - DONE — Validate removal of the inactive malformed beta.1 iPhone profile on the real host. Beta.4 removed its runtime entry and merged Netplan configuration now lists only Airtel; Airtel remained connected.
 - DONE — Hide unavailable actions from the guided menu; Netplan edit now appears, while radio control stays hidden when rfkill is absent.
 - IN PROGRESS — Validate beta.6 Netplan edit, temporary disconnect, and conditional rfkill radio control on Ubuntu. Mocked command tests pass; live edit/disconnect remain unverified. The user's server has no rfkill, so on/off must fail clearly without installing it.
+- DONE — Verify beta.6 GitHub install, version, and read-only JSON doctor on the Ubuntu host. Doctor detected wpa_cli and the active connection; its stale Netplan edit hint was corrected locally and covered by a regression test.
+- IN PROGRESS — Diagnose a stale installed bundle: beta.6 reports the new version, but the server's `dist/openwifi.cjs` lacks Netplan edit code present in the GitHub archive. Publish beta.7 by exact commit and verify the installed bundle before live edit tests.
 - TODO — Run the command-by-command Ubuntu acceptance matrix, testing live writes one at a time with physical-console recovery and redacted output. Check GitHub install, reboot persistence, and upgrade last.
 - TODO — Decide whether to release Netplan connection from the test branch after live validation.

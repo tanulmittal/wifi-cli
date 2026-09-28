@@ -203,7 +203,7 @@ export const linux = {
       const connected = await linux.status(iface).then(s => 'state' in s && s.state === 'COMPLETED').catch(() => false);
       checks.push({ name: 'connection', ok: connected, hint: connected ? 'WiFi is connected through wpa_supplicant.' : 'Could not confirm WiFi status. Try: sudo openwifi doctor --interface <WiFi interface>' });
       const hasNetplan = await which('netplan');
-      checks.push({ name: 'note', ok: hasNetplan, hint: hasNetplan ? 'Netplan can trial new networks with sudo and physical console access. Forget supports inactive openwifi-created profiles; edit needs NetworkManager.' : 'Scan/status supported. Connecting needs Netplan or NetworkManager.' });
+      checks.push({ name: 'note', ok: hasNetplan, hint: hasNetplan ? 'Netplan can trial new networks with sudo and physical console access. Edit supports password and SSID changes; forget supports inactive profiles.' : 'Scan/status supported. Connecting needs Netplan or NetworkManager.' });
     }
     return checks;
   },

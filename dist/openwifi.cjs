@@ -11699,7 +11699,7 @@ var linux = {
       const connected = await linux.status(iface).then((s) => "state" in s && s.state === "COMPLETED").catch(() => false);
       checks.push({ name: "connection", ok: connected, hint: connected ? "WiFi is connected through wpa_supplicant." : "Could not confirm WiFi status. Try: sudo openwifi doctor --interface <WiFi interface>" });
       const hasNetplan = await which("netplan");
-      checks.push({ name: "note", ok: hasNetplan, hint: hasNetplan ? "Netplan can trial new networks with sudo and physical console access. Forget supports inactive openwifi-created profiles; edit needs NetworkManager." : "Scan/status supported. Connecting needs Netplan or NetworkManager." });
+      checks.push({ name: "note", ok: hasNetplan, hint: hasNetplan ? "Netplan can trial new networks with sudo and physical console access. Edit supports password and SSID changes; forget supports inactive profiles." : "Scan/status supported. Connecting needs Netplan or NetworkManager." });
     }
     return checks;
   }
@@ -12001,7 +12001,7 @@ async function upgradeFromGithub() {
 
 // src/cli.ts
 var program2 = new Command();
-program2.name("openwifi").description("Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.").version("0.2.0-beta.6").option("--interface <name>", "WiFi interface (e.g. wlan0, en0)").option("--timeout <sec>", "command timeout in seconds", "25").option("--json", "machine-readable JSON output").option("--yes", "skip confirmations (scripts)");
+program2.name("openwifi").description("Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.").version("0.2.0-beta.7").option("--interface <name>", "WiFi interface (e.g. wlan0, en0)").option("--timeout <sec>", "command timeout in seconds", "25").option("--json", "machine-readable JSON output").option("--yes", "skip confirmations (scripts)");
 var tmo = () => {
   const seconds = Number(program2.opts().timeout ?? 25);
   if (!Number.isFinite(seconds) || seconds <= 0) throw new Error("--timeout must be a positive number of seconds");
