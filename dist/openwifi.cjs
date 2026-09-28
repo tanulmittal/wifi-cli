@@ -3965,10 +3965,26 @@ async function wpa(iface, command, arg) {
 function profilePath(iface, ssid) {
   return `${netplanDir}/90-openwifi-${iface}-${(0, import_node_crypto.createHash)("sha256").update(ssid).digest("hex").slice(0, 12)}.yaml`;
 }
+async function removableProfilePath(iface, ssid) {
+  const saved = profilePath(iface, ssid);
+  try {
+    await (0, import_promises.access)(saved);
+    return saved;
+  } catch {
+  }
+  const escaped = ssid.replace(/[^\x00-\x7f]/gu, (character) => [...Buffer.from(character)].map((byte) => `\\x${byte.toString(16).padStart(2, "0")}`).join(""));
+  if (escaped === ssid) return null;
+  const legacy = profilePath(iface, escaped);
+  try {
+    const data = JSON.parse(await (0, import_promises.readFile)(legacy, "utf8"));
+    return Object.hasOwn(data?.network?.wifis?.[iface]?.["access-points"] ?? {}, escaped) ? legacy : null;
+  } catch {
+    return null;
+  }
+}
 async function isOpenwifiProfile(ssid, iface) {
   try {
-    await (0, import_promises.access)(profilePath(await wifiInterface(iface), ssid));
-    return true;
+    return !!await removableProfilePath(await wifiInterface(iface), ssid);
   } catch {
     return false;
   }
@@ -3976,12 +3992,8 @@ async function isOpenwifiProfile(ssid, iface) {
 async function requireNetplanForget(ssid, iface) {
   if (process.getuid?.() !== 0) throw new Error("Forgetting a Netplan network requires root privileges");
   const device = await wifiInterface(iface);
-  const saved = profilePath(device, ssid);
-  try {
-    await (0, import_promises.access)(saved);
-  } catch {
-    failClosed(`"${ssid}" is managed by existing Netplan configuration. openwifi can only forget networks it added; edit its /etc/netplan YAML from the physical console`);
-  }
+  const saved = await removableProfilePath(device, ssid);
+  if (!saved) failClosed(`"${ssid}" is managed by existing Netplan configuration. openwifi can only forget networks it added; edit its /etc/netplan YAML from the physical console`);
   const status = await wpa(device, "status");
   if (status.split("\n").some((line) => line.startsWith("ssid=") && decodeWpaSsid(line.slice(5)) === ssid)) {
     failClosed(`"${ssid}" is the current connection. Connect to another network before forgetting it`);
@@ -4003,6 +4015,10 @@ async function connectNetplan(ssid, options = {}) {
   const current = await wpa(iface, "status");
   if (!current.includes("wpa_state=COMPLETED")) failClosed("Current WiFi is not connected; use the system console to repair it first");
   if (current.split("\n").some((line) => line.startsWith("ssid=") && decodeWpaSsid(line.slice(5)) === ssid)) return;
+  const existing = parseWpaNetworks(await wpa(iface, "list_networks"));
+  if (existing.some((network) => network.ssid === ssid)) {
+    failClosed(`"${ssid}" is already configured in wpa_supplicant. openwifi cannot safely reselect a stored Netplan network during a trial; no profile was added`);
+  }
   const scans = await wpa(iface, "scan_results").catch(() => "");
   const match = scans.split("\n").slice(1).map((line) => line.split("	")).find((fields) => decodeWpaSsid(fields.slice(4).join("	")) === ssid);
   const flags = match?.[3] ?? "";
@@ -4476,7 +4492,7 @@ async function upgradeFromGithub() {
 
 // src/cli.ts
 var program2 = new Command();
-program2.name("openwifi").description("Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.").version("0.2.0-beta.2").option("--interface <name>", "WiFi interface (e.g. wlan0, en0)").option("--timeout <sec>", "command timeout in seconds", "25").option("--json", "machine-readable JSON output").option("--yes", "skip confirmations (scripts)");
+program2.name("openwifi").description("Friendly WiFi manager for Ubuntu/Linux and macOS. Bare `openwifi` is guided; flags work for scripts.").version("0.2.0-beta.3").option("--interface <name>", "WiFi interface (e.g. wlan0, en0)").option("--timeout <sec>", "command timeout in seconds", "25").option("--json", "machine-readable JSON output").option("--yes", "skip confirmations (scripts)");
 var tmo = () => {
   const seconds = Number(program2.opts().timeout ?? 25);
   if (!Number.isFinite(seconds) || seconds <= 0) throw new Error("--timeout must be a positive number of seconds");

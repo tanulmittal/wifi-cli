@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { access, copyFile, mkdtemp, readdir, rm, unlink, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdtemp, readFile, readdir, rm, unlink, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { run, failClosed } from '../util.js';
@@ -104,10 +104,28 @@ async function wpa(iface, command, arg) {
 function profilePath(iface, ssid) {
     return `${netplanDir}/90-openwifi-${iface}-${createHash('sha256').update(ssid).digest('hex').slice(0, 12)}.yaml`;
 }
+async function removableProfilePath(iface, ssid) {
+    const saved = profilePath(iface, ssid);
+    try {
+        await access(saved);
+        return saved;
+    }
+    catch { /* Check beta.1's escaped-SSID format. */ }
+    const escaped = ssid.replace(/[^\x00-\x7f]/gu, character => [...Buffer.from(character)].map(byte => `\\x${byte.toString(16).padStart(2, '0')}`).join(''));
+    if (escaped === ssid)
+        return null;
+    const legacy = profilePath(iface, escaped);
+    try {
+        const data = JSON.parse(await readFile(legacy, 'utf8'));
+        return Object.hasOwn(data?.network?.wifis?.[iface]?.['access-points'] ?? {}, escaped) ? legacy : null;
+    }
+    catch {
+        return null;
+    }
+}
 export async function isOpenwifiProfile(ssid, iface) {
     try {
-        await access(profilePath(await wifiInterface(iface), ssid));
-        return true;
+        return !!await removableProfilePath(await wifiInterface(iface), ssid);
     }
     catch {
         return false;
@@ -117,13 +135,9 @@ export async function requireNetplanForget(ssid, iface) {
     if (process.getuid?.() !== 0)
         throw new Error('Forgetting a Netplan network requires root privileges');
     const device = await wifiInterface(iface);
-    const saved = profilePath(device, ssid);
-    try {
-        await access(saved);
-    }
-    catch {
+    const saved = await removableProfilePath(device, ssid);
+    if (!saved)
         failClosed(`"${ssid}" is managed by existing Netplan configuration. openwifi can only forget networks it added; edit its /etc/netplan YAML from the physical console`);
-    }
     const status = await wpa(device, 'status');
     if (status.split('\n').some(line => line.startsWith('ssid=') && decodeWpaSsid(line.slice(5)) === ssid)) {
         failClosed(`"${ssid}" is the current connection. Connect to another network before forgetting it`);
@@ -152,6 +166,10 @@ export async function connectNetplan(ssid, options = {}) {
         failClosed('Current WiFi is not connected; use the system console to repair it first');
     if (current.split('\n').some(line => line.startsWith('ssid=') && decodeWpaSsid(line.slice(5)) === ssid))
         return;
+    const existing = parseWpaNetworks(await wpa(iface, 'list_networks'));
+    if (existing.some(network => network.ssid === ssid)) {
+        failClosed(`"${ssid}" is already configured in wpa_supplicant. openwifi cannot safely reselect a stored Netplan network during a trial; no profile was added`);
+    }
     const scans = await wpa(iface, 'scan_results').catch(() => '');
     const match = scans.split('\n').slice(1).map(line => line.split('\t')).find(fields => decodeWpaSsid(fields.slice(4).join('\t')) === ssid);
     const flags = match?.[3] ?? '';

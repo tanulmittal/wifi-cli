@@ -6,12 +6,13 @@ import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
-import { forgetNetplan, netplanCandidate, parseWpaNetworks, requireNetplanForget, setNetplanDirForTests, setTrialStarter, tryNetplanConnection } from '../src/adapters/netplan.js';
+import { connectNetplan, forgetNetplan, isOpenwifiProfile, netplanCandidate, parseWpaNetworks, requireNetplanForget, setNetplanDirForTests, setTrialStarter, tryNetplanConnection } from '../src/adapters/netplan.js';
 import { setRunner } from '../src/util.js';
 
 test('Netplan candidate contains one target AP and WPA credentials in system format', () => {
   const candidate = JSON.parse(netplanCandidate('wlp2s0', "Tanul's iPhone", 'secret123', true));
   assert.deepEqual(candidate, { network: { version: 2, wifis: { wlp2s0: { 'access-points': { "Tanul's iPhone": { password: 'secret123', hidden: true } } } } } });
+  assert.deepEqual(Object.keys(JSON.parse(netplanCandidate('wlp2s0', 'Tanul’s iPhone', 'secret123')).network.wifis.wlp2s0['access-points']), ['Tanul’s iPhone']);
   assert.deepEqual(parseWpaNetworks('network id / ssid / bssid / flags\n0\tCurrent\tany\t[CURRENT]\n1\tNew WiFi\tany\t\n2\tTanul\\xe2\\x80\\x99s iPhone\tany\t\n3\t\\x00\\x00\tany\t\n'), [{ id: '0', ssid: 'Current' }, { id: '1', ssid: 'New WiFi' }, { id: '2', ssid: 'Tanul’s iPhone' }]);
 });
 
@@ -72,6 +73,49 @@ test('Netplan forget removes only an openwifi-owned inactive profile', async () 
     await assert.rejects(forgetNetplan(ssid, 'wlp2s0'), /current connection/);
     await access(file);
     current = 'Current WiFi';
+    await forgetNetplan(ssid, 'wlp2s0');
+    await assert.rejects(access(file), { code: 'ENOENT' });
+  } finally {
+    setRunner(null);
+    setNetplanDirForTests(null);
+    (process as any).getuid = getuid;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Netplan connect refuses an already configured UTF-8 SSID before starting a trial', async () => {
+  const getuid = process.getuid;
+  (process as any).getuid = () => 0;
+  const calls: string[] = [];
+  setTrialStarter(() => { throw new Error('Trial must not start'); });
+  setRunner(async (cmd, args) => {
+    calls.push(`${cmd} ${args.join(' ')}`);
+    if (cmd === 'netplan' && args[0] === 'get') return { stdout: 'access-points: {}\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('status')) return { stdout: 'wpa_state=COMPLETED\nssid=Airtel_tanu_0405\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('list_networks')) return { stdout: 'network id / ssid / bssid / flags\n0\tAirtel_tanu_0405\tany\t[CURRENT]\n1\tTanul\\xe2\\x80\\x99s iPhone\tany\t\n', stderr: '' };
+    throw new Error('Unexpected command');
+  });
+  try {
+    await assert.rejects(connectNetplan('Tanul’s iPhone', { iface: 'wlp2s0', password: 'secret123' }), /already configured/);
+    assert.deepEqual(calls.map(call => call.split(' ')[0]), ['netplan', 'wpa_cli', 'wpa_cli']);
+  } finally { setRunner(null); setTrialStarter(null); (process as any).getuid = getuid; }
+});
+
+test('Netplan forget recognizes and removes a beta.1 escaped-SSID profile', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openwifi-legacy-test-'));
+  const ssid = 'Tanul’s iPhone';
+  const escaped = 'Tanul\\xe2\\x80\\x99s iPhone';
+  const file = join(dir, `90-openwifi-wlp2s0-${createHash('sha256').update(escaped).digest('hex').slice(0, 12)}.yaml`);
+  const getuid = process.getuid;
+  (process as any).getuid = () => 0;
+  setNetplanDirForTests(dir);
+  setRunner(async (cmd, args) => {
+    if (cmd === 'wpa_cli' && args.includes('status')) return { stdout: 'wpa_state=COMPLETED\nssid=Airtel_tanu_0405\n', stderr: '' };
+    throw new Error('Unexpected command');
+  });
+  try {
+    await writeFile(file, netplanCandidate('wlp2s0', escaped, 'secret123'), { mode: 0o600 });
+    assert.equal(await isOpenwifiProfile(ssid, 'wlp2s0'), true);
     await forgetNetplan(ssid, 'wlp2s0');
     await assert.rejects(access(file), { code: 'ENOENT' });
   } finally {
