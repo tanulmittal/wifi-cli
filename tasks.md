@@ -2,22 +2,17 @@
 
 - DONE — Publish a GitHub-installable bundled `openwifi` command with an upgrade command.
 - DONE — Detect `wpa_cli` and support status/scan on `wpa_supplicant` hosts with explicit write limitations; validated with mocked commands and build.
-- DONE — Remove the Git-install preparation trigger; the user installed the bundled command on Ubuntu.
-- IN PROGRESS — Validate experimental Netplan connection on a real Ubuntu host with the user's physical console access. A beta.1 attempt reported success but persisted an escaped SSID while the server returned to Airtel. Netplan also left a timestamped `.yaml` that remained active after the stable file was removed. The branch now cleans new timestamped trial files; new-target switching remains live-unverified.
-- DONE — Validate `wpa_cli` scan/status on the real Ubuntu host. UTF-8 scan display defect found and fixed locally with regression tests.
-- DONE — Validate removal of the inactive malformed beta.1 iPhone profile on the real host. Beta.4 removed its runtime entry and merged Netplan configuration now lists only Airtel; Airtel remained connected.
-- DONE — Hide unavailable actions from the guided menu; Netplan edit now appears, while radio control stays hidden when rfkill is absent.
-- IN PROGRESS — Validate beta.7 Netplan edit, temporary disconnect, and conditional rfkill radio control on Ubuntu. Mocked command tests pass; live edit/disconnect remain unverified. The user's server has no rfkill, so on/off must fail clearly without installing it.
-- DONE — Verify beta.7 installed from exact Git commit on Ubuntu: the installed bundle SHA-256 matches the tested local bundle. JSON doctor/status/list/scan work; doctor reports Netplan editing accurately. Netplan and wpa_supplicant both list only Airtel, and the interface has IPv4. Priority edit, invalid password edits/connects, no-save connect, active-profile forget/remove, and radio on/off without rfkill all fail safely. Guided menu opens with available actions.
-- IN PROGRESS — Test a disposable hotspot connection, edit, disconnect, and inactive-profile forget with physical-console recovery. The test SSID uses a curly apostrophe; the latest server scan (8 networks) did not show it, so no trial was started. Airtel remains connected; priority-edit and radio-on safe failures re-passed on beta.7. Waiting for the hotspot to be discoverable with its settings screen open.
-- DONE — Validate a synthetic Netplan WiFi candidate with Ubuntu's installed `netplan generate --root-dir` in a temporary directory. It exited successfully without applying any live configuration; the temporary directory was removed.
-- TODO — Run the command-by-command Ubuntu acceptance matrix, testing live writes one at a time with physical-console recovery and redacted output. Check GitHub install, reboot persistence, and upgrade last.
-- TODO — Decide whether to release Netplan connection from the test branch after live validation.
-- DONE — Diagnose why the beta.7 connect trial could not succeed over SSH: the CLI died with the SSH session, so nothing confirmed the trial and `netplan try --timeout 90` auto-reverted (applied 16:30:21, reverted 16:31:07, Airtel restored).
-- DONE — Beta.8: run the Netplan trial in a detached worker (`openwifi __trial`, own session, stdio ignored) with state in `/run/openwifi/connect.json` (0644, no secrets) and a root-only log; `connect` follows it and `status` reports the outcome after a drop. The candidate YAML (0600) is deleted on every path and the PSK never enters argv.
-- DONE — Beta.8: add `openwifi use <saved SSID>` so a host can return to a previous network after a trial, and point the "already saved" connect error at it.
-- DONE — Beta.8: `doctor` compares `/run/netplan/wpa-<iface>.conf` with the saved Netplan config, and `doctor --fix` runs `netplan generate` to clear what an unfinished trial left behind; leftover candidate files are removed too.
-- DONE — Beta.8: `upgrade` resolves the newest `v*` tag with `git ls-remote` and installs that tag, refusing to downgrade without `--force`, instead of installing the default branch (main, 0.1.4) over a newer beta.
-- DONE — Beta.8: 36 unit tests pass, covering detached dispatch, worker success and rollback, `use`, generated-conf detection and repair, tag selection, and password-free worker arguments.
-- DONE — Tag `v0.2.0-beta.8` on the tested commit so the tag-based upgrade path has a real target.
-- TODO — Live matrix on the Ubuntu server (blocked until the iPhone hotspot is discoverable again): connect, `status` after the SSH drop, `use` back to Airtel, edit the inactive iPhone profile, forget it, disconnect last, `doctor --fix`, then `upgrade`.
+- DONE — Validate `wpa_cli` scan/status/list/doctor on the real Ubuntu host, including UTF-8 SSID decoding and Netplan backend detection.
+- DONE — Remove the inactive malformed beta.1 iPhone profile and its runtime entry on the real host; Airtel stayed connected.
+- DONE — Hide unavailable guided actions (radio control without rfkill) and confirm link-changing Netplan actions.
+- DONE — Diagnose the beta.7 trial failure: the CLI died with the SSH session, so nothing confirmed the trial and `netplan try --timeout 90` auto-reverted (applied 16:30:21, reverted 16:31:07, Airtel restored).
+- DONE — Run the Netplan trial in a detached worker with state in `/run/openwifi/connect.json` and a root-only log; `connect` follows it, `status` reports the outcome, and the password-bearing candidate is deleted on every path.
+- DONE — Add `openwifi use <saved SSID>` so a host can return to a previous network after a trial, and point the already-saved connect error at it.
+- DONE — `doctor` compares the generated `/run/netplan/wpa-<iface>.conf` with the saved Netplan config; both `doctor --fix` and the trial worker regenerate it, and a rollback also drops the trial's runtime entry and candidate file.
+- DONE — `upgrade` resolves the newest `v*` GitHub tag with `git ls-remote` and installs that tag, refusing to downgrade without `--force`, instead of installing the default branch (main, 0.1.4) over a newer beta.
+- DONE — Live-verified the detached trial on Ubuntu: a trial to a deliberately nonexistent SSID dropped SSH, and the worker outlived the session, detected the failure after 47 seconds, cleaned up the generated config and the runtime entry, recorded `rolled-back`, and returned the host to Airtel. `openwifi status` reported the outcome after reconnecting.
+- DONE — Live-verified `doctor`, `doctor --fix` (no link drop), `use`, `list`, `status`, and tag-based `upgrade` on the real host; the installed bundle SHA-256 matched the tested local bundle.
+- DONE — 40 unit tests cover detached dispatch, worker success/rollback/cleanup, `use`, generated-config detection and repair, tag selection, and password-free worker arguments.
+- TODO — Live matrix still open: connect to the iPhone hotspot, edit its inactive profile, forget it, then `disconnect` last. Blocked until the hotspot is discoverable in a fresh scan.
+- TODO — Reboot-persistence check for a saved Netplan profile, from the physical console.
+- TODO — Merge `netplan-connect` into `main` and tag a stable release once the remaining matrix passes.

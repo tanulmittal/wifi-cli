@@ -12288,7 +12288,7 @@ async function guided(rawArgv) {
 }
 
 // src/version.ts
-var VERSION = "0.2.0-beta.9";
+var VERSION = "0.2.0-beta.10";
 
 // src/upgrade.ts
 var UPGRADE_REPO = "https://github.com/tanulmittal/wifi-cli.git";
