@@ -337,6 +337,49 @@ test('the detached worker records a rollback and saves nothing when the trial ca
   }
 });
 
+test('a rolled-back trial rebuilds the generated WiFi config instead of leaving the trial network', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openwifi-worker-repair-test-'));
+  const getuid = process.getuid;
+  (process as any).getuid = () => 0;
+  const ssid = 'Blocked WiFi';
+  const filename = '90-openwifi-wlp2s0-' + createHash('sha256').update(ssid).digest('hex').slice(0, 12) + '.yaml';
+  const candidate = join(dir, 'openwifi', filename);
+  await mkdir(join(dir, 'openwifi'), { recursive: true });
+  await writeFile(candidate, netplanCandidate('wlp2s0', ssid, 'secret123'), { mode: 0o600 });
+  const generated = join(dir, 'wpa-wlp2s0.conf');
+  await writeFile(generated, 'network={\n  ssid=P"Airtel_tanu_0405"\n}\nnetwork={\n  ssid=P"Blocked WiFi"\n}\n', { mode: 0o600 });
+  setNetplanDirForTests(dir);
+  setNetplanTempRootForTests(dir);
+  setGeneratedConfDirForTests(dir);
+  setTrialStateDirForTests(join(dir, 'state'));
+  await writeTrialState({ phase: 'starting', ssid, iface: 'wlp2s0', pid: 1, startedAt: new Date().toISOString(), stateFile: trialStateFile(), logFile: trialLogFile() });
+  const trial = new EventEmitter() as ChildProcess;
+  (trial as any).kill = () => { queueMicrotask(() => trial.emit('exit', 1)); return true; };
+  setTrialStarter(() => trial);
+  let regenerated = false;
+  setRunner(async (cmd, args) => {
+    if (cmd === 'wpa_cli' && args.includes('list_networks')) return { stdout: 'network id / ssid / bssid / flags\n1\tBlocked WiFi\tany\t\n', stderr: '' };
+    if (cmd === 'wpa_cli' && args.includes('select_network')) return { stdout: 'FAIL\n', stderr: '' };
+    if (cmd === 'netplan' && args[0] === 'get') return { stdout: 'Airtel_tanu_0405:\n  auth:\n    key-management: psk\n', stderr: '' };
+    if (cmd === 'netplan' && args[0] === 'generate') {
+      regenerated = true;
+      await writeFile(generated, 'network={\n  ssid=P"Airtel_tanu_0405"\n}\n', { mode: 0o600 });
+      return { stdout: '', stderr: '' };
+    }
+    throw new Error('Unexpected command: ' + cmd);
+  });
+  try {
+    assert.equal(await runConnectTrial({ iface: 'wlp2s0', ssid, candidate }), 1);
+    assert.equal(regenerated, true, 'the worker must rebuild the generated config after a rollback');
+    assert.deepEqual(parseConfSsids(await readFile(generated, 'utf8')), ['Airtel_tanu_0405']);
+    assert.equal((await readTrialState())?.phase, 'rolled-back');
+  } finally {
+    setRunner(null); setTrialStarter(null); setGeneratedConfDirForTests(null); setTrialStateDirForTests(null);
+    setNetplanDirForTests(null); setNetplanTempRootForTests(null); (process as any).getuid = getuid;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('use selects an existing runtime network without writing configuration', async () => {
 test('a trial worker that never starts is reported instead of looking like a running trial', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openwifi-worker-start-test-'));

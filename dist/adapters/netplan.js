@@ -289,8 +289,11 @@ export async function runConnectTrial(o) {
             const message = error instanceof Error ? error.message : String(error);
             if (content)
                 await removeNewTrialCopies(saved, content, previous).catch(() => { });
+            // A rolled-back Netplan try restores /etc/netplan but can leave the trial network in the
+            // generated /run/netplan conf, so rebuild it here instead of asking the user to run doctor.
+            const repaired = await repairGeneratedConf(o.iface).catch(() => null);
             await write({ phase: 'rolled-back', saved: false, error: message, finishedAt: new Date().toISOString() });
-            await appendTrialLog(`trial rolled back: ${message}`);
+            await appendTrialLog(`trial rolled back: ${message}${repaired?.removed.length ? `; refreshed generated config, removed ${repaired.removed.join(', ')}` : ''}`);
             return 1;
         }
     }

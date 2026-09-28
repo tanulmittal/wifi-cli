@@ -11553,8 +11553,9 @@ async function runConnectTrial(o) {
       const message = error instanceof Error ? error.message : String(error);
       if (content) await removeNewTrialCopies(saved, content, previous).catch(() => {
       });
+      const repaired = await repairGeneratedConf(o.iface).catch(() => null);
       await write({ phase: "rolled-back", saved: false, error: message, finishedAt: (/* @__PURE__ */ new Date()).toISOString() });
-      await appendTrialLog(`trial rolled back: ${message}`);
+      await appendTrialLog(`trial rolled back: ${message}${repaired?.removed.length ? `; refreshed generated config, removed ${repaired.removed.join(", ")}` : ""}`);
       return 1;
     }
   } finally {
